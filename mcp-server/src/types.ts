@@ -1,5 +1,5 @@
-export type AgentName = 'A' | 'EXAMINER'
-export type ReviewerName = 'A'
+export type AgentName = 'REVIEWER' | 'EXAMINER'
+export type ReviewerName = 'REVIEWER'
 export type ExaminerName = 'EXAMINER'
 export type SessionStatus = 'ongoing' | 'finished'
 export type FinalJudgment = 'OK' | 'NG'

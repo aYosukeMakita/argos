@@ -20,9 +20,13 @@ function judgmentTone(value: string | null): 'neutral' | 'success' | 'danger' {
   return 'neutral'
 }
 
-function actorLabel(actor: 'A' | 'EXAMINER' | null): string {
+function actorLabel(actor: 'REVIEWER' | 'EXAMINER' | null): string {
   if (actor === 'EXAMINER') {
     return 'Examiner'
+  }
+
+  if (actor === 'REVIEWER') {
+    return 'Reviewer'
   }
 
   return actor ?? '-'
@@ -46,7 +50,7 @@ export function SessionDetailPage({ sessionId }: { sessionId: string }) {
   }
 
   const messages = messagesState.data?.items ?? []
-  const reviewMessage = messages.find(message => message.round === 1 && message.agent === 'A') ?? null
+  const reviewMessage = messages.find(message => message.round === 1 && message.agent === 'REVIEWER') ?? null
   const examinerMessage = messages.find(message => message.agent === 'EXAMINER') ?? null
 
   return (
@@ -102,7 +106,7 @@ export function SessionDetailPage({ sessionId }: { sessionId: string }) {
         <div className="timeline-grid">
           {messages.map(message => (
             <article
-              className={`timeline-card ${message.agent === 'A' ? 'align-left' : 'align-right'}`}
+              className={`timeline-card ${message.agent === 'REVIEWER' ? 'align-left' : 'align-right'}`}
               key={message.id}
             >
               <div className="timeline-head">
@@ -125,7 +129,7 @@ export function SessionDetailPage({ sessionId }: { sessionId: string }) {
         <p className="card-label">Flow Notes</p>
         <h2>運用メモ</h2>
         <ul className="plain-list">
-          <li>Round 1 の A 発言は start_session 時に自動生成されます。</li>
+          <li>Round 1 の reviewer 発言は start_session 時に自動生成されます。</li>
           <li>ポーリング間隔は 5 秒です。</li>
           <li>finished のセッションは submit_message を受け付けません。</li>
         </ul>

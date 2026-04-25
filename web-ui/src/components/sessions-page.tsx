@@ -14,6 +14,10 @@ function actorLabel(actor: SessionRecord['next_actor'] | SessionRecord['examiner
     return 'Examiner'
   }
 
+  if (actor === 'REVIEWER') {
+    return 'Reviewer'
+  }
+
   return actor ?? '-'
 }
 

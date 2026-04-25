@@ -21,11 +21,11 @@ user-invocable: true
 
 1. 利用者入力から `session_id` または `review_id` を判定する
 2. `session_id` が渡された場合は、その `session_id` をそのまま使う
-3. `review_id` のみが渡された場合は、`start_session(review_id=..., reviewer="A")` を呼び、新しい `session_id` を取得する
+3. `review_id` のみが渡された場合は、`start_session(review_id=..., reviewer="REVIEWER")` を呼び、新しい `session_id` を取得する
 4. 使用する `session_id` が確定したら `get_next_action(session_id=...)` を呼び、自分の手番かどうかを確認する
 5. 手番でなければ、保存しなかった理由だけを返して終了する
 6. 手番なら `get_session(session_id=...)` と `get_session_messages(session_id=...)` を取得する
-7. Round 1 の A のレビュー本文を読み、各指摘の妥当性を評価する
+7. Round 1 の reviewer のレビュー本文を読み、各指摘の妥当性を評価する
 8. `judgment="OK"` または `judgment="NG"` を決め、現在のチャットで実行中のモデル名が明示的に読み取れるならその値を `model_name` に入れ、読み取れない場合は `model_name="Unknown"` として `submit_message(session_id=..., agent="EXAMINER", model_name=..., content=..., judgment=...)` を呼ぶ
 
 ## Input Rules
@@ -37,15 +37,15 @@ user-invocable: true
 
 ## Review Policy
 
-- A の結論をうのみにせず、誤検知の可能性を優先して確認する
+- reviewer の結論をうのみにせず、誤検知の可能性を優先して確認する
 - ただし、無理な反証はせず、反証根拠がない場合は妥当と判断する
 - 指摘ごとに、根拠の強さと前提条件を明確にする
-- diff 外のコードも、A の指摘の妥当性確認に必要な範囲で参照してよい
-- A の指摘自体は妥当でも、重大度が過大または過小である場合はその点も指摘する
+- diff 外のコードも、reviewer の指摘の妥当性確認に必要な範囲で参照してよい
+- reviewer の指摘自体は妥当でも、重大度が過大または過小である場合はその点も指摘する
 
 ## Judgment Rules
 
-- A の指摘群について、重大な誤検知や根拠不足が見当たらず、全体として妥当と判断できる場合は `judgment="OK"`
+- reviewer の指摘群について、重大な誤検知や根拠不足が見当たらず、全体として妥当と判断できる場合は `judgment="OK"`
 - 誤検知の可能性が高い指摘、根拠不足の指摘、前提依存が強すぎる指摘、重大度の評価が不適切な指摘が 1 件でもある場合は `judgment="NG"`
 
 ## Output Format
@@ -66,7 +66,7 @@ user-invocable: true
 - 評価:
 - 根拠:
 - 重大度見直し: なし | High→Medium | High→Low | Medium→High | Medium→Low | Low→Medium | Low→High
-- A への返答:
+- reviewer への返答:
 - 追加確認事項: なし または必要事項
 
 ### M1
@@ -75,7 +75,7 @@ user-invocable: true
 - 評価:
 - 根拠:
 - 重大度見直し: なし | Medium→High | Medium→Low | High→Medium | Low→Medium
-- A への返答:
+- reviewer への返答:
 - 追加確認事項: なし または必要事項
 
 ### L1
@@ -84,7 +84,7 @@ user-invocable: true
 - 評価:
 - 根拠:
 - 重大度見直し: なし | Low→Medium | Low→High | Medium→Low | High→Low
-- A への返答:
+- reviewer への返答:
 - 追加確認事項: なし または必要事項
 
 必要な件数だけ続ける。

@@ -15,7 +15,7 @@ export function createMcpServer(service: ArgosService): McpServer {
   server.tool(
     'save_review',
     {
-      agent_name: z.string(),
+      agent_name: z.enum(['REVIEWER']),
       model_name: z.string().trim().min(1).max(120).optional(),
       content: z.string(),
     },
@@ -61,11 +61,10 @@ export function createMcpServer(service: ArgosService): McpServer {
     'start_session',
     {
       review_id: z.string(),
-      reviewer: z.string().optional(),
-      examiner: z.string().optional(),
+      reviewer: z.enum(['REVIEWER']).optional(),
     },
-    async ({ review_id, reviewer, examiner }) => {
-      const result = service.startSession(review_id, reviewer, examiner)
+    async ({ review_id, reviewer }) => {
+      const result = service.startSession(review_id, reviewer)
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         structuredContent: toStructuredContent(result),
@@ -120,7 +119,7 @@ export function createMcpServer(service: ArgosService): McpServer {
     'submit_message',
     {
       session_id: z.string(),
-      agent: z.string(),
+      agent: z.enum(['REVIEWER', 'EXAMINER']),
       model_name: z.string().trim().min(1).max(120).optional(),
       content: z.string(),
       judgment: z.enum(['OK', 'NG']).nullable().optional(),

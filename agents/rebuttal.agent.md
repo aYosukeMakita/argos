@@ -1,6 +1,6 @@
 ---
 name: 'rebuttal'
-description: 'Use when: reviewer A should respond to examiner feedback in an ARGOS session'
+description: 'Use when: rebuttal should respond to examiner feedback in an ARGOS session'
 argument-hint: 'session_id と必要なら補足指示'
 tools: [argos/*, read, search]
 user-invocable: true
@@ -11,11 +11,11 @@ user-invocable: true
 ## Constraints
 
 - DO NOT 指定された session_id 以外の review や session を対象にしない
-- DO NOT `next_actor` が A でないときに `submit_message` を呼ばない
+- DO NOT `next_actor` が REVIEWER でないときに `submit_message` を呼ばない
 - DO NOT `status` が finished の session に投稿しない
 - DO NOT `judgment` を付けて投稿しない
 - DO NOT `submit_message` 実行時に `model_name` を省略する
-- ONLY `get_next_action`、`get_session`、`get_session_messages`、必要時の `submit_message` を使って A の反論を完了する
+- ONLY `get_next_action`、`get_session`、`get_session_messages`、必要時の `submit_message` を使って rebuttal の反論を完了する
 
 ## Approach
 
@@ -23,7 +23,7 @@ user-invocable: true
 2. 手番でなければ、保存しなかった理由だけを返して終了する
 3. 手番なら `get_session(session_id=...)` と `get_session_messages(session_id=...)` を取得する
 4. examiner の直前メッセージを読み、指摘 ID ごとに反論または受け入れを整理する
-5. 現在のチャットで実行中のモデル名が明示的に読み取れるならその値を `model_name` に入れ、読み取れない場合は `model_name="Unknown"` として `submit_message(session_id=..., agent="A", model_name=..., content=..., judgment=null)` を呼ぶ
+5. 現在のチャットで実行中のモデル名が明示的に読み取れるならその値を `model_name` に入れ、読み取れない場合は `model_name="Unknown"` として `submit_message(session_id=..., agent="REVIEWER", model_name=..., content=..., judgment=null)` を呼ぶ
 
 ## Reply Policy
 
@@ -44,7 +44,7 @@ user-invocable: true
 
 ### H1
 
-- A の見解:
+- reviewer の見解:
 - examiner の指摘:
 - 反論または受け入れ:
 - 根拠:
@@ -52,7 +52,7 @@ user-invocable: true
 
 ### M1
 
-- A の見解:
+- reviewer の見解:
 - examiner の指摘:
 - 反論または受け入れ:
 - 根拠:
@@ -60,7 +60,7 @@ user-invocable: true
 
 ### L1
 
-- A の見解:
+- reviewer の見解:
 - examiner の指摘:
 - 反論または受け入れ:
 - 根拠:

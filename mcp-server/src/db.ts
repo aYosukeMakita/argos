@@ -228,7 +228,7 @@ export function createDatabase(): SqliteDatabase {
   db.exec(`
     CREATE TABLE IF NOT EXISTS reviews (
       id TEXT PRIMARY KEY,
-      agent_name TEXT NOT NULL CHECK (agent_name IN ('A')),
+      agent_name TEXT NOT NULL CHECK (agent_name IN ('REVIEWER')),
       model_name TEXT,
       content TEXT NOT NULL,
       created_at TEXT NOT NULL
@@ -237,7 +237,7 @@ export function createDatabase(): SqliteDatabase {
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       review_id TEXT NOT NULL,
-      reviewer TEXT NOT NULL CHECK (reviewer IN ('A')),
+      reviewer TEXT NOT NULL CHECK (reviewer IN ('REVIEWER')),
       examiner TEXT NOT NULL CHECK (examiner = 'EXAMINER'),
       max_rounds INTEGER NOT NULL CHECK (max_rounds = 3),
       current_round INTEGER NOT NULL CHECK (current_round BETWEEN 1 AND 3),
@@ -254,7 +254,7 @@ export function createDatabase(): SqliteDatabase {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
       round INTEGER NOT NULL CHECK (round BETWEEN 1 AND 3),
-      agent TEXT NOT NULL CHECK (agent IN ('A', 'EXAMINER')),
+      agent TEXT NOT NULL CHECK (agent IN ('REVIEWER', 'EXAMINER')),
       model_name TEXT,
       content TEXT NOT NULL,
       judgment TEXT CHECK (judgment IN ('OK', 'NG')),

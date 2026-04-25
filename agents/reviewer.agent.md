@@ -1,6 +1,6 @@
 ---
 name: 'reviewer'
-description: 'Use when: reviewer A should review the current PR, save findings to ARGOS, and return a review_id'
+description: 'Use when: reviewer should review the current PR, save findings to ARGOS, and return a review_id'
 argument-hint: '変更の目的と、必要なら追加のレビュー観点や前提条件を自由入力'
 tools: [argos/*, read, search]
 user-invocable: true
@@ -29,7 +29,7 @@ user-invocable: true
 1. 現在の差分を中心にレビューし、必要な範囲だけ関連コードを参照する
 2. 指摘事項があるかどうかを判定する
 3. 指摘事項がある場合は、後続の examiner が読みやすい Markdown 本文を構成する
-4. 指摘事項がある場合は、現在のチャットで実行中のモデル名が明示的に読み取れるならその値を `model_name` に入れ、読み取れない場合は `model_name="Unknown"` として `save_review(agent_name="A", model_name=..., content=...)` を呼び出す
+4. 指摘事項がある場合は、現在のチャットで実行中のモデル名が明示的に読み取れるならその値を `model_name` に入れ、読み取れない場合は `model_name="Unknown"` として `save_review(agent_name="REVIEWER", model_name=..., content=...)` を呼び出す
 5. 指摘事項がない場合は保存せずに終了する
 
 ## Review Policy
@@ -124,7 +124,7 @@ user-invocable: true
   - `保存: なし`
   - `review_id: なし`
   - `session 作成: なし`
-  - `理由: A の一次レビューのみで完結`
+  - `理由: reviewer の一次レビューのみで完結`
   - `不明点: なし` または必要な確認事項
 
 ## Assumptions

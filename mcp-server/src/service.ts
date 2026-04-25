@@ -20,7 +20,7 @@ function mapSession(row: Record<string, unknown>): SessionRecord {
   return {
     id: String(row.id),
     review_id: String(row.review_id),
-    reviewer: row.reviewer as 'A',
+    reviewer: row.reviewer as 'REVIEWER',
     examiner: row.examiner as 'EXAMINER',
     max_rounds: Number(row.max_rounds),
     current_round: Number(row.current_round),
@@ -36,7 +36,7 @@ function mapSession(row: Record<string, unknown>): SessionRecord {
 function mapReview(row: Record<string, unknown>): ReviewRecord {
   return {
     id: String(row.id),
-    agent_name: row.agent_name as 'A',
+    agent_name: row.agent_name as 'REVIEWER',
     model_name: typeof row.model_name === 'string' ? row.model_name : null,
     content: String(row.content),
     created_at: String(row.created_at),
@@ -79,12 +79,12 @@ function normalizePagination(input: PaginationInput): Required<PaginationInput> 
 export class ArgosService {
   constructor(private readonly db: SqliteDatabase) {}
 
-  private normalizeExaminerAgent(agent: string): AgentName | null {
-    if (agent === 'A') {
-      return 'A'
+  private normalizeAgent(agent: string): AgentName | null {
+    if (agent === 'REVIEWER') {
+      return 'REVIEWER'
     }
 
-    if (agent === 'EXAMINER' || agent === 'B' || agent === 'C') {
+    if (agent === 'EXAMINER') {
       return 'EXAMINER'
     }
 
@@ -92,8 +92,9 @@ export class ArgosService {
   }
 
   saveReview(agentName: string, content: string, modelName?: string): { review_id: string; created_at: string } {
-    if (agentName !== 'A') {
-      throw new AppError(400, 'agent_name must be A', 'VALIDATION_ERROR')
+    const normalizedAgentName = this.normalizeAgent(agentName)
+    if (normalizedAgentName !== 'REVIEWER') {
+      throw new AppError(400, 'agent_name must be REVIEWER', 'VALIDATION_ERROR')
     }
 
     assertNonEmpty(content, 'content')
@@ -107,7 +108,7 @@ export class ArgosService {
         `INSERT INTO reviews (id, agent_name, model_name, content, created_at)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(reviewId, agentName, normalizedModelName, content.trim(), createdAt)
+      .run(reviewId, normalizedAgentName, normalizedModelName, content.trim(), createdAt)
 
     return { review_id: reviewId, created_at: createdAt }
   }
@@ -170,8 +171,7 @@ export class ArgosService {
 
   startSession(
     reviewId: string,
-    reviewer = 'A',
-    _examiner?: string,
+    reviewer = 'REVIEWER',
   ): {
     session_id: string
     review_id: string
@@ -179,8 +179,9 @@ export class ArgosService {
     next_actor: string
     status: string
   } {
-    if (reviewer !== 'A') {
-      throw new AppError(400, 'reviewer must be A', 'VALIDATION_ERROR')
+    const normalizedReviewer = this.normalizeAgent(reviewer)
+    if (normalizedReviewer !== 'REVIEWER') {
+      throw new AppError(400, 'reviewer must be REVIEWER', 'VALIDATION_ERROR')
     }
 
     const review = this.getReview(reviewId)
@@ -196,12 +197,12 @@ export class ArgosService {
              status, final_judgment, completion_reason, created_at, updated_at
            ) VALUES (?, ?, ?, ?, 3, 1, ?, 'ongoing', NULL, NULL, ?, ?)`,
         )
-        .run(sessionId, reviewId, reviewer, 'EXAMINER', 'EXAMINER', createdAt, createdAt)
+        .run(sessionId, reviewId, normalizedReviewer, 'EXAMINER', 'EXAMINER', createdAt, createdAt)
 
       this.db
         .prepare(
           `INSERT INTO discussion_messages (session_id, round, agent, model_name, content, judgment, created_at)
-           VALUES (?, 1, 'A', ?, ?, NULL, ?)`,
+           VALUES (?, 1, 'REVIEWER', ?, ?, NULL, ?)`,
         )
         .run(sessionId, review.model_name, review.content, createdAt)
     })
@@ -279,10 +280,10 @@ export class ArgosService {
   ): SubmitMessageResult {
     assertNonEmpty(content, 'content')
     const normalizedModelName = modelName?.trim() || null
-    const normalizedAgent = this.normalizeExaminerAgent(agent)
+    const normalizedAgent = this.normalizeAgent(agent)
 
     if (!normalizedAgent) {
-      throw new AppError(400, 'agent must be A or EXAMINER', 'VALIDATION_ERROR')
+      throw new AppError(400, 'agent must be REVIEWER or EXAMINER', 'VALIDATION_ERROR')
     }
 
     const session = this.getSession(sessionId)
@@ -296,7 +297,7 @@ export class ArgosService {
 
     const createdAt = nowIso()
 
-    if (normalizedAgent === 'A') {
+    if (normalizedAgent === 'REVIEWER') {
       if (judgment !== undefined && judgment !== null) {
         throw new AppError(400, 'reviewer judgment must be null', 'VALIDATION_ERROR')
       }
@@ -310,7 +311,7 @@ export class ArgosService {
           this.db
             .prepare(
               `INSERT INTO discussion_messages (session_id, round, agent, model_name, content, judgment, created_at)
-               VALUES (?, ?, 'A', ?, ?, NULL, ?)`,
+               VALUES (?, ?, 'REVIEWER', ?, ?, NULL, ?)`,
             )
             .run(sessionId, session.current_round, normalizedModelName, content.trim(), createdAt)
 
@@ -390,7 +391,7 @@ export class ArgosService {
           .prepare(
             `UPDATE sessions
              SET current_round = current_round + 1,
-                 next_actor = 'A',
+                 next_actor = 'REVIEWER',
                  updated_at = ?
              WHERE id = ?`,
           )

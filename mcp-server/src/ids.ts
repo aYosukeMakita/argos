@@ -15,5 +15,5 @@ export function createReviewId(now = new Date()): string {
 }
 
 export function createSessionId(now = new Date()): string {
-  return `session_AEX_${timestampPart(now)}_${crypto.randomBytes(3).toString('hex')}`
+  return `session_REX_${timestampPart(now)}_${crypto.randomBytes(3).toString('hex')}`
 }

@@ -7,6 +7,7 @@ import type { DiscussionMessageRecord } from '@/lib/types'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
+import { MarkdownContent, type FindingOutcome } from '@/components/markdown-content'
 import { StatusBadge } from '@/components/status-badge'
 import { usePollingResource } from '@/components/use-polling-resource'
 
@@ -32,6 +33,36 @@ function actorLabel(actor: 'REVIEWER' | 'EXAMINER' | null): string {
   return actor ?? '-'
 }
 
+function extractFindingOutcomes(messages: DiscussionMessageRecord[]): Partial<Record<string, FindingOutcome>> {
+  const finalExaminerMessage = [...messages]
+    .reverse()
+    .find(message => message.agent === 'EXAMINER' && message.judgment !== null)
+
+  if (!finalExaminerMessage) {
+    return {}
+  }
+
+  const outcomes: Partial<Record<string, FindingOutcome>> = {}
+  const sectionPattern = /^###\s+([HML]\d+)\s*$([\s\S]*?)(?=^###\s+[HML]\d+\s*$|^##\s+|\Z)/gm
+
+  for (const match of finalExaminerMessage.content.matchAll(sectionPattern)) {
+    const findingId = match[1]
+    const sectionBody = match[2] ?? ''
+    const verdict = /^-\s*判定:\s*(.+)$/m.exec(sectionBody)?.[1]?.trim()
+
+    if (verdict === '妥当') {
+      outcomes[findingId] = 'bug'
+      continue
+    }
+
+    if (verdict === '要再検討' || verdict === '根拠不足') {
+      outcomes[findingId] = 'false-positive'
+    }
+  }
+
+  return outcomes
+}
+
 export function SessionDetailPage({ sessionId }: { sessionId: string }) {
   const sessionState = usePollingResource(() => fetchSession(sessionId), [sessionId])
   const messagesState = usePollingResource(() => fetchSessionMessages(sessionId), [sessionId])
@@ -52,6 +83,7 @@ export function SessionDetailPage({ sessionId }: { sessionId: string }) {
   const messages = messagesState.data?.items ?? []
   const reviewMessage = messages.find(message => message.round === 1 && message.agent === 'REVIEWER') ?? null
   const examinerMessage = messages.find(message => message.agent === 'EXAMINER') ?? null
+  const findingOutcomes = session.status === 'finished' ? extractFindingOutcomes(messages) : undefined
 
   return (
     <div className="detail-grid">
@@ -113,7 +145,7 @@ export function SessionDetailPage({ sessionId }: { sessionId: string }) {
                 <span>Round {message.round}</span>
                 <span>{getMessageModelLabel(message)}</span>
               </div>
-              <p>{message.content}</p>
+              <MarkdownContent className="timeline-copy" content={message.content} findingOutcomes={findingOutcomes} />
               <div className="timeline-foot">
                 <span>{new Date(message.created_at).toLocaleString()}</span>
                 {message.judgment ? (

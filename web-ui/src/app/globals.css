@@ -162,8 +162,7 @@ a {
 }
 
 .card-copy,
-.review-body,
-.timeline-card p,
+.markdown-content,
 .state-card p,
 .plain-list {
   line-height: 1.75;
@@ -176,9 +175,117 @@ a {
 }
 
 .review-body {
-  white-space: pre-wrap;
   font-size: 1rem;
   margin-top: 18px;
+}
+
+.timeline-copy {
+  margin-top: 14px;
+}
+
+.finding-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.markdown-content > :first-child {
+  margin-top: 0;
+}
+
+.markdown-content > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content :is(h1, h2, h3, h4) {
+  font-family: var(--font-heading), sans-serif;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  margin: 1.25em 0 0.45em;
+}
+
+.markdown-content h1 {
+  font-size: 1.7rem;
+}
+
+.markdown-content h2 {
+  font-size: 1.4rem;
+}
+
+.markdown-content h3,
+.markdown-content h4 {
+  font-size: 1.1rem;
+}
+
+.markdown-content p,
+.markdown-content ul,
+.markdown-content ol,
+.markdown-content blockquote,
+.markdown-content pre,
+.markdown-content table {
+  margin: 0 0 1em;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  padding-left: 1.4rem;
+}
+
+.markdown-content li + li {
+  margin-top: 0.35em;
+}
+
+.markdown-content a {
+  color: var(--brand-dark);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+.markdown-content blockquote {
+  margin-left: 0;
+  padding: 0.1rem 0 0.1rem 1rem;
+  border-left: 3px solid rgba(158, 61, 41, 0.35);
+  color: var(--muted);
+}
+
+.markdown-content :not(pre) > code {
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(31, 42, 44, 0.08);
+  font-size: 0.94em;
+}
+
+.markdown-content pre {
+  overflow-x: auto;
+  padding: 0.9rem 1rem;
+  border-radius: 18px;
+  background: rgba(31, 42, 44, 0.92);
+  color: #f8f4ed;
+}
+
+.markdown-content pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+}
+
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.markdown-content th,
+.markdown-content td {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  text-align: left;
+}
+
+.markdown-content th {
+  background: rgba(31, 42, 44, 0.06);
 }
 
 .meta-row,

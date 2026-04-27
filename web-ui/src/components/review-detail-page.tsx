@@ -7,6 +7,7 @@ import type { ReviewRecord } from '@/lib/types'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
+import { MarkdownContent } from '@/components/markdown-content'
 import { StatusBadge } from '@/components/status-badge'
 import { usePollingResource } from '@/components/use-polling-resource'
 
@@ -42,7 +43,7 @@ export function ReviewDetailPage({ reviewId }: { reviewId: string }) {
           <StatusBadge tone="neutral">{getReviewModelLabel(review)}</StatusBadge>
         </div>
         <p className="meta-text">作成日時: {new Date(review.created_at).toLocaleString()}</p>
-        <div className="review-body">{review.content}</div>
+        <MarkdownContent className="review-body" content={review.content} />
       </article>
 
       <aside className="panel-card side-panel">

@@ -183,6 +183,13 @@ a {
   margin-top: 14px;
 }
 
+.finding-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .markdown-content > :first-child {
   margin-top: 0;
 }

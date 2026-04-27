@@ -164,13 +164,18 @@ MCP 接続が正しくできていれば、Copilot Chat から少なくとも以
 配置先は 2 通りあります。
 
 - ワークスペース単位で使う場合: 利用先リポジトリの `.github/agents/`
-- ユーザープロファイル単位で使う場合: VSCode の profile agents ディレクトリ
+- ユーザープロファイル単位で使う場合: `~/.copilot/agents/`
+
+`~/.copilot/agents/` 以下に配置した `*.agent.md` はグローバル設定として扱われ、ワークスペースをまたいで利用できます。
 
 例:
 
 - `agents/reviewer.agent.md` を利用先の `.github/agents/reviewer.agent.md` にコピーする
 - `agents/examiner.agent.md` を利用先の `.github/agents/examiner.agent.md` にコピーする
 - `agents/rebuttal.agent.md` を利用先の `.github/agents/rebuttal.agent.md` にコピーする
+- `agents/reviewer.agent.md` を `~/.copilot/agents/reviewer.agent.md` にコピーする
+- `agents/examiner.agent.md` を `~/.copilot/agents/examiner.agent.md` にコピーする
+- `agents/rebuttal.agent.md` を `~/.copilot/agents/rebuttal.agent.md` にコピーする
 
 その後、Copilot Chat の agent picker から `reviewer`、`examiner`、`rebuttal` を選んで実行できます。
 

@@ -53,6 +53,20 @@ npm run dev
 docker compose up --build
 ```
 
+### 注意: 別マシンからアクセスする場合の Web UI と API のホスト検出
+
+Web UI はブラウザ上で実行されるため、`localhost` はクライアント側を指します。
+同じマシン上で `web-ui` と `mcp-server` を動かす運用では、Web UI が実行されているホストのIPアドレスを使って API にアクセスする必要があります。
+
+このリポジトリの Web UI は、クライアント実行時に現在のページのホスト名を使って API のベース URL を自動生成します（デフォルトの API ポートは `3001`）。
+環境変数 `NEXT_PUBLIC_ARGOS_API_BASE_URL` を設定すれば、これを明示的に上書きできます。
+
+例: サーバー側で再ビルドして Web UI の API 接続先を固定する場合:
+
+```bash
+NEXT_PUBLIC_ARGOS_API_BASE_URL="http://192.168.0.60:3001" docker compose up --build -d web-ui
+```
+
 ## VSCode で MCP サーバーを使う設定
 
 VSCode はデフォルト状態のままでは、この MCP サーバーに自動接続しません。

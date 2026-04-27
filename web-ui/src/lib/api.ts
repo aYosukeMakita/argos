@@ -1,6 +1,22 @@
 import type { DiscussionMessageRecord, ListResult, ReviewRecord, SessionRecord } from '@/lib/types'
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_ARGOS_API_BASE_URL ?? 'http://localhost:3001'
+const apiBaseUrl = (() => {
+  const env = process.env.NEXT_PUBLIC_ARGOS_API_BASE_URL
+  if (env) {
+    return env
+  }
+
+  // If running in the browser, derive API host from current page host
+  if (typeof window !== 'undefined' && window.location) {
+    const proto = window.location.protocol
+    const host = window.location.hostname
+    // API listens on port 3001 by default
+    return `${proto}//${host}:3001`
+  }
+
+  // Fallback for server-side / build-time
+  return 'http://localhost:3001'
+})()
 
 class ApiError extends Error {
   constructor(

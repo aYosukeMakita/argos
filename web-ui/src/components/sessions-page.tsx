@@ -21,6 +21,10 @@ function actorLabel(actor: SessionRecord['next_actor'] | SessionRecord['examiner
   return actor ?? '-'
 }
 
+function examinerLabel(session: SessionRecord): string {
+  return session.examiner_model_name ?? actorLabel(session.examiner)
+}
+
 export function SessionsPage({ reviewId }: { reviewId?: string }) {
   const sessionsState = usePollingResource(() => fetchSessions(reviewId), [reviewId ?? 'all'])
 
@@ -62,7 +66,7 @@ export function SessionsPage({ reviewId }: { reviewId?: string }) {
             </div>
             <div>
               <span className="meta-label">Examiner</span>
-              <strong>{actorLabel(session.examiner)}</strong>
+              <strong>{examinerLabel(session)}</strong>
             </div>
             <div>
               <span className="meta-label">Current Round</span>

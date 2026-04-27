@@ -18,6 +18,7 @@ export interface SessionRecord {
   review_id: string
   reviewer: ReviewerName
   examiner: ExaminerName
+  examiner_model_name: string | null
   max_rounds: number
   current_round: number
   next_actor: AgentName | null

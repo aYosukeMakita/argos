@@ -10,8 +10,8 @@ import { LoadingState } from '@/components/loading-state'
 import { StatusBadge } from '@/components/status-badge'
 import { usePollingResource } from '@/components/use-polling-resource'
 
-function examinerLabel(): string {
-  return 'Examiner'
+function examinerLabel(modelName: string | null): string {
+  return modelName ?? 'Examiner'
 }
 
 export function ReviewDetailPage({ reviewId }: { reviewId: string }) {
@@ -60,7 +60,7 @@ export function ReviewDetailPage({ reviewId }: { reviewId: string }) {
           {sessionsState.data?.items.map(session => (
             <Link className="side-link" href={`/sessions/${session.id}`} key={session.id}>
               <span>{session.id}</span>
-              <span>{examinerLabel()}</span>
+              <span>{examinerLabel(session.examiner_model_name)}</span>
               <StatusBadge tone={session.status === 'finished' ? 'success' : 'warning'}>{session.status}</StatusBadge>
             </Link>
           ))}

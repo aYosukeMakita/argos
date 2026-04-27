@@ -22,6 +22,7 @@ function mapSession(row: Record<string, unknown>): SessionRecord {
     review_id: String(row.review_id),
     reviewer: row.reviewer as 'REVIEWER',
     examiner: row.examiner as 'EXAMINER',
+    examiner_model_name: typeof row.examiner_model_name === 'string' ? row.examiner_model_name : null,
     max_rounds: Number(row.max_rounds),
     current_round: Number(row.current_round),
     next_actor: (row.next_actor ?? null) as AgentName | null,
@@ -219,9 +220,21 @@ export class ArgosService {
   }
 
   getSession(sessionId: string): SessionRecord {
-    const row = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(sessionId) as
-      | Record<string, unknown>
-      | undefined
+    const row = this.db
+      .prepare(
+        `SELECT sessions.*, (
+           SELECT discussion_messages.model_name
+           FROM discussion_messages
+           WHERE discussion_messages.session_id = sessions.id
+             AND discussion_messages.agent = 'EXAMINER'
+             AND discussion_messages.model_name IS NOT NULL
+           ORDER BY discussion_messages.created_at ASC, discussion_messages.id ASC
+           LIMIT 1
+         ) AS examiner_model_name
+         FROM sessions
+         WHERE id = ?`,
+      )
+      .get(sessionId) as Record<string, unknown> | undefined
 
     if (!row) {
       throw new AppError(404, 'session not found', 'NOT_FOUND')
@@ -250,7 +263,20 @@ export class ArgosService {
     const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
 
     const items = this.db
-      .prepare(`SELECT * FROM sessions ${whereClause} ORDER BY created_at DESC`)
+      .prepare(
+        `SELECT sessions.*, (
+           SELECT discussion_messages.model_name
+           FROM discussion_messages
+           WHERE discussion_messages.session_id = sessions.id
+             AND discussion_messages.agent = 'EXAMINER'
+             AND discussion_messages.model_name IS NOT NULL
+           ORDER BY discussion_messages.created_at ASC, discussion_messages.id ASC
+           LIMIT 1
+         ) AS examiner_model_name
+         FROM sessions
+         ${whereClause}
+         ORDER BY sessions.created_at DESC`,
+      )
       .all(...params) as Record<string, unknown>[]
 
     return { items: items.map(mapSession), total: items.length }

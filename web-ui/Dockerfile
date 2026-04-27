@@ -6,8 +6,6 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 FROM deps AS build
-ARG NEXT_PUBLIC_ARGOS_API_BASE_URL=http://localhost:3001
-ENV NEXT_PUBLIC_ARGOS_API_BASE_URL=${NEXT_PUBLIC_ARGOS_API_BASE_URL}
 COPY tsconfig.json next.config.ts next-env.d.ts ./
 COPY public ./public
 COPY src ./src

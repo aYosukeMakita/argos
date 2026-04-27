@@ -16,12 +16,9 @@ services:
   web-ui:
     build:
       context: ./web-ui
-      args:
-        NEXT_PUBLIC_ARGOS_API_BASE_URL: http://localhost:3001
     container_name: argos-web-ui
     environment:
       PORT: 3000
-      NEXT_PUBLIC_ARGOS_API_BASE_URL: http://localhost:3001
     depends_on:
       - mcp-server
     ports:

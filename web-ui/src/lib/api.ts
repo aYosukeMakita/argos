@@ -1,6 +1,12 @@
 import type { DiscussionMessageRecord, ListResult, ReviewRecord, SessionRecord } from '@/lib/types'
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_ARGOS_API_BASE_URL ?? 'http://localhost:3001'
+const DEFAULT_API_PORT = '3001'
+
+function resolveBrowserApiBaseUrl(): string {
+  const url = new URL(window.location.origin)
+  url.port = DEFAULT_API_PORT
+  return url.origin
+}
 
 class ApiError extends Error {
   constructor(
@@ -13,7 +19,7 @@ class ApiError extends Error {
 }
 
 async function requestJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await fetch(`${getApiBaseUrl()}${path}`, {
     cache: 'no-store',
   })
 
@@ -34,7 +40,7 @@ async function requestJson<T>(path: string): Promise<T> {
 }
 
 async function requestWithMethod<T>(path: string, method: 'DELETE'): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await fetch(`${getApiBaseUrl()}${path}`, {
     method,
     cache: 'no-store',
   })
@@ -56,7 +62,16 @@ async function requestWithMethod<T>(path: string, method: 'DELETE'): Promise<T> 
 }
 
 export function getApiBaseUrl(): string {
-  return apiBaseUrl
+  if (typeof window !== 'undefined' && window.location) {
+    return resolveBrowserApiBaseUrl()
+  }
+
+  const env = process.env.NEXT_PUBLIC_ARGOS_API_BASE_URL
+  if (env) {
+    return env
+  }
+
+  return `http://localhost:${DEFAULT_API_PORT}`
 }
 
 export async function fetchReviews(

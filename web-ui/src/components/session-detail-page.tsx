@@ -7,6 +7,7 @@ import type { DiscussionMessageRecord } from '@/lib/types'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
+import { MarkdownContent } from '@/components/markdown-content'
 import { StatusBadge } from '@/components/status-badge'
 import { usePollingResource } from '@/components/use-polling-resource'
 
@@ -113,7 +114,7 @@ export function SessionDetailPage({ sessionId }: { sessionId: string }) {
                 <span>Round {message.round}</span>
                 <span>{getMessageModelLabel(message)}</span>
               </div>
-              <p>{message.content}</p>
+              <MarkdownContent className="timeline-copy" content={message.content} />
               <div className="timeline-foot">
                 <span>{new Date(message.created_at).toLocaleString()}</span>
                 {message.judgment ? (

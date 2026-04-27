@@ -14,6 +14,7 @@ export function createMcpServer(service: ArgosService): McpServer {
 
   server.tool(
     'save_review',
+    'Persist a reviewer-authored review body to ARGOS and return its review_id.',
     {
       agent_name: z.enum(['REVIEWER']),
       model_name: z.string().trim().min(1).max(120).optional(),
@@ -30,6 +31,7 @@ export function createMcpServer(service: ArgosService): McpServer {
 
   server.tool(
     'get_review',
+    'Fetch a saved ARGOS review by review_id.',
     {
       review_id: z.string(),
     },
@@ -44,6 +46,7 @@ export function createMcpServer(service: ArgosService): McpServer {
 
   server.tool(
     'list_reviews',
+    'List saved ARGOS reviews with optional pagination.',
     {
       limit: z.number().int().min(1).max(200).optional(),
       offset: z.number().int().min(0).optional(),
@@ -59,6 +62,7 @@ export function createMcpServer(service: ArgosService): McpServer {
 
   server.tool(
     'start_session',
+    'Create a new examiner session for an existing review and return its session_id.',
     {
       review_id: z.string(),
       reviewer: z.enum(['REVIEWER']).optional(),
@@ -74,6 +78,7 @@ export function createMcpServer(service: ArgosService): McpServer {
 
   server.tool(
     'get_session',
+    'Fetch ARGOS session metadata by session_id.',
     {
       session_id: z.string(),
     },
@@ -88,6 +93,7 @@ export function createMcpServer(service: ArgosService): McpServer {
 
   server.tool(
     'list_sessions',
+    'List ARGOS sessions with optional filtering by review_id or status.',
     {
       review_id: z.string().optional(),
       status: z.enum(['ongoing', 'finished']).optional(),
@@ -103,6 +109,7 @@ export function createMcpServer(service: ArgosService): McpServer {
 
   server.tool(
     'get_session_messages',
+    'Fetch all saved messages for a specific ARGOS session.',
     {
       session_id: z.string(),
     },
@@ -117,6 +124,7 @@ export function createMcpServer(service: ArgosService): McpServer {
 
   server.tool(
     'submit_message',
+    'Append an examiner or reviewer message to an ARGOS session and optionally record a judgment.',
     {
       session_id: z.string(),
       agent: z.enum(['REVIEWER', 'EXAMINER']),
@@ -135,6 +143,7 @@ export function createMcpServer(service: ArgosService): McpServer {
 
   server.tool(
     'get_next_action',
+    'Return the next expected actor and current status for an ARGOS session.',
     {
       session_id: z.string(),
     },

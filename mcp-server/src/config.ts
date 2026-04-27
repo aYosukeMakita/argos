@@ -1,6 +1,9 @@
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const defaultDataDir = path.resolve(process.cwd(), 'data')
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+// Use repository root ./data so both dev and prod reference the same DB
+const defaultDataDir = path.resolve(__dirname, '..', '..', 'data')
 
 export const config = {
   port: Number(process.env.PORT ?? 3001),

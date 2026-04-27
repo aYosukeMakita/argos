@@ -137,7 +137,8 @@ a {
   gap: 18px;
 }
 
-.review-list {
+.review-list,
+.session-list {
   grid-template-columns: minmax(0, 1fr);
 }
 

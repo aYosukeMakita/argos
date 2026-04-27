@@ -44,7 +44,7 @@ export function SessionsPage({ reviewId }: { reviewId?: string }) {
   }
 
   return (
-    <section className="stack-grid">
+    <section className="stack-grid session-list">
       {sessions.map(session => (
         <article className="panel-card session-card" key={session.id}>
           <div className="card-header">

@@ -11,7 +11,7 @@ services:
     ports:
       - "3001:3001"
     volumes:
-      - sqlite-data:/app/data
+      - ./data:/app/data
 
   web-ui:
     build:
@@ -27,5 +27,4 @@ services:
     ports:
       - "8080:3000"
 
-volumes:
-  sqlite-data:
+# Use host directory ./data for sqlite persistence

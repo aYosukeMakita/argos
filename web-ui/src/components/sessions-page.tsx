@@ -79,7 +79,6 @@ export function SessionsPage({ reviewId }: { reviewId?: string }) {
           </div>
           <div className="action-row">
             <Link href={`/sessions/${session.id}`}>セッション詳細</Link>
-            <Link href={`/reviews/${session.review_id}`}>レビュー詳細</Link>
           </div>
         </article>
       ))}

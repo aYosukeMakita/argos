@@ -39,7 +39,7 @@ a {
 }
 
 .page-shell {
-  width: min(1180px, calc(100vw - 32px));
+  width: min(1280px, calc(100vw - 32px));
   margin: 0 auto;
   padding: 28px 0 48px;
 }
@@ -302,6 +302,27 @@ a {
   flex-wrap: wrap;
 }
 
+.review-accordion-panel {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.review-accordion-section {
+  border-radius: 22px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.review-accordion-header {
+  margin-bottom: 12px;
+}
+
+.review-accordion-header h3 {
+  margin: 0;
+}
+
 .danger-action {
   border-color: rgba(152, 43, 43, 0.24);
   color: var(--danger);
@@ -518,7 +539,7 @@ a {
 
 @media (max-width: 680px) {
   .page-shell {
-    width: min(100vw - 20px, 1180px);
+    width: min(100vw - 20px, 1280px);
     padding-top: 16px;
   }
 

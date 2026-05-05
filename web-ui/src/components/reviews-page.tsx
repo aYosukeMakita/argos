@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useMemo, useState } from 'react'
 import { deleteReview, fetchReviews, fetchSessions } from '@/lib/api'
 import { getReviewModelLabel } from '@/lib/model-label'
+import { MarkdownContent } from '@/components/markdown-content'
 import type { ReviewRecord, SessionRecord } from '@/lib/types'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
@@ -18,6 +19,22 @@ function countSessionsByReview(items: SessionRecord[]): Map<string, number> {
     counts.set(session.review_id, (counts.get(session.review_id) ?? 0) + 1)
   }
   return counts
+}
+
+function groupSessionsByReview(items: SessionRecord[]): Map<string, SessionRecord[]> {
+  const sessionsByReview = new Map<string, SessionRecord[]>()
+
+  for (const session of items) {
+    const current = sessionsByReview.get(session.review_id)
+    if (current) {
+      current.push(session)
+      continue
+    }
+
+    sessionsByReview.set(session.review_id, [session])
+  }
+
+  return sessionsByReview
 }
 
 function summarizeReviewStatus(items: SessionRecord[]): Map<string, 'Not Started' | 'Ongoing' | 'Finished'> {
@@ -41,6 +58,10 @@ function preview(content: string): string {
   return content.length > 180 ? `${content.slice(0, 180)}...` : content
 }
 
+function examinerLabel(modelName: string | null): string {
+  return modelName ?? 'Examiner'
+}
+
 const REVIEWS_PER_PAGE = 10
 
 function createPageHref(page: number): string {
@@ -56,6 +77,7 @@ export function ReviewsPage({ page }: { page: number }) {
   const currentPage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 1
   const offset = (currentPage - 1) * REVIEWS_PER_PAGE
   const [refreshKey, setRefreshKey] = useState(0)
+  const [openReviewId, setOpenReviewId] = useState<string | null>(null)
   const [confirmingReviewId, setConfirmingReviewId] = useState<string | null>(null)
   const [deletingReviewId, setDeletingReviewId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -74,6 +96,11 @@ export function ReviewsPage({ page }: { page: number }) {
   const reviewStatuses = useMemo(() => {
     const items = sessionsState.data?.items ?? []
     return summarizeReviewStatus(items)
+  }, [sessionsState.data])
+
+  const sessionsByReview = useMemo(() => {
+    const items = sessionsState.data?.items ?? []
+    return groupSessionsByReview(items)
   }, [sessionsState.data])
 
   if (reviewsState.isLoading && !reviewsState.data) {
@@ -108,6 +135,7 @@ export function ReviewsPage({ page }: { page: number }) {
     try {
       await deleteReview(reviewId)
       setConfirmingReviewId(null)
+      setOpenReviewId(current => (current === reviewId ? null : current))
 
       if (reviews.length === 1 && currentPage > 1) {
         router.push(createPageHref(currentPage - 1))
@@ -127,73 +155,122 @@ export function ReviewsPage({ page }: { page: number }) {
       {actionError ? <ErrorState message={actionError} /> : null}
 
       <section className="stack-grid review-list">
-        {reviews.map((review: ReviewRecord) => (
-          <article className="panel-card review-card" key={review.id}>
-            <div className="card-header">
-              <div>
-                <p className="card-label">Review</p>
-                <h2>{review.id}</h2>
-              </div>
-              <div className="badge-stack">
-                <StatusBadge
-                  tone={
-                    reviewStatuses.get(review.id) === 'Finished'
-                      ? 'success'
-                      : reviewStatuses.get(review.id) === 'Ongoing'
-                        ? 'warning'
-                        : 'neutral'
-                  }
-                >
-                  {reviewStatuses.get(review.id) ?? 'Not Started'}
-                </StatusBadge>
-                <StatusBadge tone="neutral">{getReviewModelLabel(review)}</StatusBadge>
-              </div>
-            </div>
-            <p className="card-copy">{preview(review.content)}</p>
-            <div className="meta-row">
-              <span>{new Date(review.created_at).toLocaleString()}</span>
-              <span>{sessionCounts.get(review.id) ?? 0} sessions</span>
-            </div>
-            <div className="action-row">
-              <Link href={`/reviews/${review.id}`}>レビュー詳細</Link>
-              <Link href={`/sessions?review_id=${encodeURIComponent(review.id)}`}>関連セッション</Link>
-              <button
-                className="danger-action"
-                disabled={deletingReviewId === review.id}
-                onClick={() => {
-                  setActionError(null)
-                  setConfirmingReviewId(review.id)
-                }}
-                type="button"
-              >
-                {deletingReviewId === review.id ? '削除中...' : '削除'}
-              </button>
-            </div>
-            {confirmingReviewId === review.id ? (
-              <div className="confirm-strip" role="alert">
-                <p className="confirm-copy">このレビューと関連セッションを削除します。よろしいですか？</p>
-                <div className="confirm-actions">
+        {reviews.map((review: ReviewRecord) =>
+          (() => {
+            const isExpanded = openReviewId === review.id
+            const relatedSessions = sessionsByReview.get(review.id) ?? []
+
+            return (
+              <article className="panel-card review-card" key={review.id}>
+                <div className="card-header">
+                  <div>
+                    <p className="card-label">Review</p>
+                    <h2>{review.id}</h2>
+                  </div>
+                  <div className="badge-stack">
+                    <StatusBadge
+                      tone={
+                        reviewStatuses.get(review.id) === 'Finished'
+                          ? 'success'
+                          : reviewStatuses.get(review.id) === 'Ongoing'
+                            ? 'warning'
+                            : 'neutral'
+                      }
+                    >
+                      {reviewStatuses.get(review.id) ?? 'Not Started'}
+                    </StatusBadge>
+                    <StatusBadge tone="neutral">{getReviewModelLabel(review)}</StatusBadge>
+                  </div>
+                </div>
+                <p className="card-copy">{preview(review.content)}</p>
+                <div className="meta-row">
+                  <span>{new Date(review.created_at).toLocaleString()}</span>
+                  <span>{sessionCounts.get(review.id) ?? 0} sessions</span>
+                </div>
+                <div className="action-row">
+                  <button
+                    aria-controls={`review-accordion-${review.id}`}
+                    aria-expanded={isExpanded}
+                    className="secondary-action"
+                    onClick={() => setOpenReviewId(current => (current === review.id ? null : review.id))}
+                    type="button"
+                  >
+                    {isExpanded ? '詳細を閉じる' : '詳細を開く'}
+                  </button>
+                  <Link href={`/sessions?review_id=${encodeURIComponent(review.id)}`}>関連セッション</Link>
                   <button
                     className="danger-action"
                     disabled={deletingReviewId === review.id}
-                    onClick={() => void handleDelete(review.id)}
+                    onClick={() => {
+                      setActionError(null)
+                      setConfirmingReviewId(review.id)
+                    }}
                     type="button"
                   >
-                    削除する
-                  </button>
-                  <button
-                    className="secondary-action"
-                    disabled={deletingReviewId === review.id}
-                    onClick={() => setConfirmingReviewId(current => (current === review.id ? null : current))}
-                    type="button"
-                  >
-                    キャンセル
+                    {deletingReviewId === review.id ? '削除中...' : '削除'}
                   </button>
                 </div>
-              </div>
-            ) : null}
-          </article>
-        ))}
+                {isExpanded ? (
+                  <div className="detail-grid review-accordion-panel" id={`review-accordion-${review.id}`}>
+                    <section className="review-accordion-section">
+                      <p className="card-label">Primary Review</p>
+                      <p className="meta-text">作成日時: {new Date(review.created_at).toLocaleString()}</p>
+                      <MarkdownContent className="review-body" content={review.content} />
+                    </section>
+
+                    <aside className="review-accordion-section">
+                      <div className="card-header review-accordion-header">
+                        <div>
+                          <p className="card-label">Sessions</p>
+                          <h3>関連セッション</h3>
+                        </div>
+                      </div>
+                      {sessionsState.error && !sessionsState.data ? <ErrorState message={sessionsState.error} /> : null}
+                      {relatedSessions.length === 0 ? (
+                        <p className="meta-text">セッションはまだありません。start_session 後にここへ表示されます。</p>
+                      ) : (
+                        <div className="side-list">
+                          {relatedSessions.map(session => (
+                            <Link className="side-link" href={`/sessions/${session.id}`} key={session.id}>
+                              <span>{session.id}</span>
+                              <span>{examinerLabel(session.examiner_model_name)}</span>
+                              <StatusBadge tone={session.status === 'finished' ? 'success' : 'warning'}>
+                                {session.status}
+                              </StatusBadge>
+                            </Link>
+                          ))}
+                        </div>
+                      )}
+                    </aside>
+                  </div>
+                ) : null}
+                {confirmingReviewId === review.id ? (
+                  <div className="confirm-strip" role="alert">
+                    <p className="confirm-copy">このレビューと関連セッションを削除します。よろしいですか？</p>
+                    <div className="confirm-actions">
+                      <button
+                        className="danger-action"
+                        disabled={deletingReviewId === review.id}
+                        onClick={() => void handleDelete(review.id)}
+                        type="button"
+                      >
+                        削除する
+                      </button>
+                      <button
+                        className="secondary-action"
+                        disabled={deletingReviewId === review.id}
+                        onClick={() => setConfirmingReviewId(current => (current === review.id ? null : current))}
+                        type="button"
+                      >
+                        キャンセル
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </article>
+            )
+          })(),
+        )}
       </section>
 
       <nav aria-label="レビュー一覧のページング" className="pagination-row">

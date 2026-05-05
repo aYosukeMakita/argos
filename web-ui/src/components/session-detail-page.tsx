@@ -1,9 +1,8 @@
 'use client'
 
-import Link from 'next/link'
-import { fetchSession, fetchSessionMessages } from '@/lib/api'
+import { fetchReview, fetchSession, fetchSessionMessages } from '@/lib/api'
 import { getMessageModelLabel } from '@/lib/model-label'
-import type { DiscussionMessageRecord } from '@/lib/types'
+import type { DiscussionMessageRecord, ReviewRecord } from '@/lib/types'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
@@ -66,6 +65,10 @@ function extractFindingOutcomes(messages: DiscussionMessageRecord[]): Partial<Re
 export function SessionDetailPage({ sessionId }: { sessionId: string }) {
   const sessionState = usePollingResource(() => fetchSession(sessionId), [sessionId])
   const messagesState = usePollingResource(() => fetchSessionMessages(sessionId), [sessionId])
+  const reviewState = usePollingResource<ReviewRecord | null>(
+    () => (sessionState.data ? fetchReview(sessionState.data.review_id) : Promise.resolve(null)),
+    [sessionState.data?.review_id ?? ''],
+  )
 
   if (sessionState.isLoading && !sessionState.data) {
     return <LoadingState label="セッション詳細を読み込み中です。" />
@@ -101,7 +104,7 @@ export function SessionDetailPage({ sessionId }: { sessionId: string }) {
         <div className="session-meta-grid compact-grid">
           <div>
             <span className="meta-label">Review</span>
-            <Link href={`/reviews/${session.review_id}`}>{session.review_id}</Link>
+            <strong>{session.review_id}</strong>
           </div>
           <div>
             <span className="meta-label">Examiner</span>
@@ -109,7 +112,11 @@ export function SessionDetailPage({ sessionId }: { sessionId: string }) {
           </div>
           <div>
             <span className="meta-label">Review Model</span>
-            <strong>{reviewMessage?.model_name ?? '-'}</strong>
+            <strong>{reviewMessage ? getMessageModelLabel(reviewMessage) : '-'}</strong>
+          </div>
+          <div>
+            <span className="meta-label">Review Created</span>
+            <strong>{reviewState.data ? new Date(reviewState.data.created_at).toLocaleString() : '-'}</strong>
           </div>
           <div>
             <span className="meta-label">Examiner Model</span>

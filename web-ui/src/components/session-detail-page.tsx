@@ -42,7 +42,7 @@ function extractFindingOutcomes(messages: DiscussionMessageRecord[]): Partial<Re
   }
 
   const outcomes: Partial<Record<string, FindingOutcome>> = {}
-  const sectionPattern = /^###\s+([HML]\d+)\s*$([\s\S]*?)(?=^###\s+[HML]\d+\s*$|^##\s+|\Z)/gm
+  const sectionPattern = /^###\s+([HML]\d+)\s*$([\s\S]*?)(?=^###\s+[HML]\d+\s*$|^##\s|$(?![\s\S]))/gm
 
   for (const match of finalExaminerMessage.content.matchAll(sectionPattern)) {
     const findingId = match[1]

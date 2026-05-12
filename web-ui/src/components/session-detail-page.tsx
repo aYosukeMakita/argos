@@ -57,12 +57,12 @@ function extractFindingOutcomes(messages: DiscussionMessageRecord[]): Partial<Re
     const sectionBody = match[2] ?? ''
     const verdict = /^-\s*判定:\s*(.+)$/m.exec(sectionBody)?.[1]?.trim()
 
-    if (verdict === '妥当') {
+    if (verdict?.startsWith('妥当')) {
       outcomes[findingId] = 'bug'
       continue
     }
 
-    if (verdict === '要再検討' || verdict === '根拠不足') {
+    if (verdict?.startsWith('要再検討') || verdict?.startsWith('根拠不足')) {
       outcomes[findingId] = 'false-positive'
     }
   }

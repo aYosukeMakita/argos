@@ -9,7 +9,7 @@ import { LoadingState } from '@/components/loading-state'
 import { StatusBadge } from '@/components/status-badge'
 import { usePollingResource } from '@/components/use-polling-resource'
 
-function actorLabel(actor: SessionRecord['next_actor'] | SessionRecord['examiner']): string {
+function actorLabel(actor: SessionRecord['next_actor']): string {
   if (actor === 'EXAMINER') {
     return 'Examiner'
   }
@@ -19,6 +19,14 @@ function actorLabel(actor: SessionRecord['next_actor'] | SessionRecord['examiner
   }
 
   return actor ?? '-'
+}
+
+function nextActorLabel(actor: SessionRecord['next_actor']): string {
+  if (actor === 'REVIEWER') {
+    return 'REBUTTAL'
+  }
+
+  return actorLabel(actor)
 }
 
 function examinerLabel(session: SessionRecord): string {
@@ -74,7 +82,7 @@ export function SessionsPage({ reviewId }: { reviewId?: string }) {
             </div>
             <div>
               <span className="meta-label">Next Actor</span>
-              <strong>{actorLabel(session.next_actor)}</strong>
+              <strong>{nextActorLabel(session.next_actor)}</strong>
             </div>
           </div>
           <div className="action-row">

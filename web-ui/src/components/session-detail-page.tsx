@@ -32,6 +32,14 @@ function actorLabel(actor: 'REVIEWER' | 'EXAMINER' | null): string {
   return actor ?? '-'
 }
 
+function nextActorLabel(actor: 'REVIEWER' | 'EXAMINER' | null): string {
+  if (actor === 'REVIEWER') {
+    return 'REBUTTAL'
+  }
+
+  return actorLabel(actor)
+}
+
 function extractFindingOutcomes(messages: DiscussionMessageRecord[]): Partial<Record<string, FindingOutcome>> {
   const finalExaminerMessage = [...messages]
     .reverse()
@@ -128,7 +136,7 @@ export function SessionDetailPage({ sessionId }: { sessionId: string }) {
           </div>
           <div>
             <span className="meta-label">Next Actor</span>
-            <strong>{actorLabel(session.next_actor)}</strong>
+            <strong>{nextActorLabel(session.next_actor)}</strong>
           </div>
           <div>
             <span className="meta-label">Completion</span>

@@ -12,6 +12,7 @@ user-invocable: true
 
 - DO NOT 指定された session_id 以外の review や session を対象にしない
 - DO NOT `next_actor` が REVIEWER でないときに `submit_message` を呼ばない
+- DO NOT 論点ごとの返答の見出し行（`### H1`、`### M1`、`### L1` 等）に ID 以外のテキスト（タイトル・ダッシュ・説明など）を追加する（例：`### M1 — タイトル` は禁止、`### M1` のみが正しい）
 - DO NOT `status` が finished の session に投稿しない
 - DO NOT `judgment` を付けて投稿しない
 - DO NOT `submit_message` 実行時に `model_name` を省略する
@@ -40,7 +41,7 @@ user-invocable: true
 
 ## Input Rules
 
-- `diff.patch` が添付またはワークスペースに存在する場合は、その内容を最優先の差分ソースとして扱う
+- `diff.patch` が添付またはワークスペース内（ルート直下だけでなくサブディレクトリも含めてfind等で再帰的に探索し）存在する場合は、その内容を最優先の差分ソースとして扱う
 - `diff.patch` がない場合は、現在開いている PR の差分コンテキストを差分ソースとして扱う
 - 差分ソースを特定できない場合は、推測反論を行わず「差分未取得」として終了する
 

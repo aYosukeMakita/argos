@@ -12,6 +12,7 @@ user-invocable: true
 
 - DO NOT 指定された session_id または review_id 以外の review や session を対象にしない
 - DO NOT `next_actor` が EXAMINER でないときに `submit_message` を呼ばない
+- DO NOT 指摘ごとの評価の見出し行（`### H1`、`### M1`、`### L1` 等）に ID 以外のテキスト（タイトル・ダッシュ・説明など）を追加する（例：`### M1 — タイトル` は禁止、`### M1` のみが正しい）
 - DO NOT `status` が finished の session に投稿しない
 - DO NOT `submit_message` 実行時に `model_name` を省略する
 - DO NOT `review_id` だけが渡された場合に、`start_session` を行わず終了する
@@ -58,7 +59,7 @@ user-invocable: true
 - `review_id` のみが渡された場合は、新しい examiner session を作成してから吟味を始める
 - `session_id` と `review_id` の両方が渡された場合は `session_id` を優先する
 - `review_id` を複数回渡すと examiner session が複数作られる可能性があるため、その挙動を隠さず明示する
-- `diff.patch` が添付またはワークスペースに存在する場合は、その内容を最優先の差分ソースとして扱う
+- `diff.patch` が添付またはワークスペース内（ルート直下だけでなくサブディレクトリも含めてfind等で再帰的に探索し）存在する場合は、その内容を最優先の差分ソースとして扱う
 - `diff.patch` がない場合は、現在開いている PR の差分コンテキストを差分ソースとして扱う
 - 差分ソースを特定できない場合は、推測吟味を行わず「差分未取得」として終了する
 

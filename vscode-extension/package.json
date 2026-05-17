@@ -1,0 +1,65 @@
+{
+  "name": "argos-vscode-extension",
+  "displayName": "ARGOS Auto Review",
+  "description": "Run ARGOS auto review with VS Code Copilot language models.",
+  "version": "0.1.2",
+  "private": true,
+  "publisher": "argos",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aYosukeMakita/argos.git",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "argos.startAutoReview",
+        "title": "ARGOS: Start Auto Review"
+      }
+    ],
+    "configuration": {
+      "title": "ARGOS",
+      "properties": {
+        "argos.apiBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:3001",
+          "description": "Base URL for the ARGOS REST API."
+        },
+        "argos.webUiBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "Base URL for the ARGOS Web UI."
+        },
+        "argos.includeContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include changed files and common metadata files as additional review context."
+        },
+        "argos.contextBudget": {
+          "type": "number",
+          "default": 220000,
+          "minimum": 0,
+          "description": "Maximum number of characters of additional code context sent to each model request."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "vsce package --skip-license --out argos-vscode-extension-${npm_package_version}.vsix",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/vscode": "^1.101.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.8.3"
+  }
+}

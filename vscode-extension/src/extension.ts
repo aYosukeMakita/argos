@@ -1,15 +1,16 @@
+import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import * as vscode from 'vscode'
 
-type AgentName = 'REVIEWER' | 'EXAMINER'
+type MessageAgent = 'REVIEWER' | 'EXAMINER' | 'REBUTTAL'
+type NextActor = 'EXAMINER' | 'REBUTTAL'
 type FinalJudgment = 'OK' | 'NG'
+type CompletionReason = 'approved' | 'max_rounds_reached'
 
 interface ExtensionSettings {
-  apiBaseUrl: string
-  webUiBaseUrl: string
   includeContext: boolean
   contextBudget: number
 }
@@ -18,7 +19,7 @@ interface DiscussionMessageRecord {
   id: number
   session_id: string
   round: number
-  agent: AgentName
+  agent: MessageAgent
   model_name: string | null
   content: string
   judgment: FinalJudgment | null
@@ -26,20 +27,11 @@ interface DiscussionMessageRecord {
 }
 
 interface NextAction {
-  agent: AgentName | null
+  agent: NextActor | null
   round: number
   status: 'ongoing' | 'finished'
   final_judgment: FinalJudgment | null
-  completion_reason: 'approved' | 'max_rounds_reached' | null
-}
-
-interface SubmitMessageResult {
-  session_id: string
-  current_round: number
-  next_actor: AgentName | null
-  status: 'ongoing' | 'finished'
-  final_judgment: FinalJudgment | null
-  completion_reason: 'approved' | 'max_rounds_reached' | null
+  completion_reason: CompletionReason | null
 }
 
 interface ReviewerOutput {
@@ -53,6 +45,10 @@ interface ExaminerOutput {
 }
 
 interface RebuttalOutput {
+  content: string
+}
+
+interface ConclusionOutput {
   content: string
 }
 
@@ -96,8 +92,28 @@ interface ReviewFormLabels {
   emptyPurpose: string
 }
 
+interface ReviewReport {
+  reviewId: string
+  sessionId: string
+  createdAt: string
+  purpose: string
+  repositoryRoot: string
+  diffRange: string
+  markdownUri: vscode.Uri
+  conclusionMarkdown: string
+  finalJudgment: FinalJudgment
+  completionReason: CompletionReason
+  models: {
+    reviewer: string
+    examiner: string
+    rebuttal: string
+  }
+  messages: DiscussionMessageRecord[]
+}
+
 const execFileAsync = promisify(execFile)
 const textDecoder = new TextDecoder('utf8')
+const textEncoder = new TextEncoder()
 
 const metadataFiles = [
   'package.json',
@@ -213,7 +229,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       output.clear()
       output.show(true)
       logStep(output, `Workspace: ${workspaceFolder.uri.fsPath}`)
-      logStep(output, `ARGOS API: ${settings.apiBaseUrl}`)
+      logStep(output, `Report directory: ${workspaceFolder.uri.fsPath}`)
       logStep(output, `Reviewer model: ${modelNameForStorage(models.reviewer)}`)
       logStep(output, `Examiner model: ${modelNameForStorage(models.examiner)}`)
       logStep(output, `Rebuttal model: ${modelNameForStorage(models.rebuttal)}`)
@@ -232,6 +248,12 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         diffPatch: collected.diffPatch,
         codeContext: collected.codeContext,
       }
+      const reviewId = createLocalId('review')
+      const sessionId = createLocalId('session')
+      input.reviewId = reviewId
+      input.sessionId = sessionId
+      const messages: DiscussionMessageRecord[] = []
+      const createdAt = new Date().toISOString()
 
       progress.report({ message: `Reviewer を ${models.reviewer.name} で実行しています` })
       logStep(output, `Reviewer を ${modelNameForStorage(models.reviewer)} で実行します`)
@@ -244,51 +266,29 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       )
       const reviewer = parseJsonObject<ReviewerOutput>(reviewerRaw, validateReviewerOutput)
       throwIfCancelled(token)
-
-      logProgress(output, 'Reviewer: ARGOS API にレビューを保存します')
-      const savedReview = await requestArgos<{ review_id: string; created_at: string }>(
-        settings.apiBaseUrl,
-        '/api/reviews',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            agent_name: 'REVIEWER',
-            model_name: modelNameForStorage(models.reviewer),
-            content: reviewer.content,
-          }),
-        },
-      )
-      input.reviewId = savedReview.review_id
-      logArtifact(output, `review_id: ${savedReview.review_id}`)
-
-      logProgress(output, 'Session: ARGOS API にセッションを作成します')
-      const session = await requestArgos<{
-        session_id: string
-        review_id: string
-        current_round: number
-        next_actor: AgentName
-        status: string
-      }>(settings.apiBaseUrl, '/api/sessions', {
-        method: 'POST',
-        body: JSON.stringify({ review_id: savedReview.review_id, reviewer: 'REVIEWER' }),
+      messages.push({
+        id: messages.length + 1,
+        session_id: sessionId,
+        round: 1,
+        agent: 'REVIEWER',
+        model_name: modelNameForStorage(models.reviewer),
+        content: reviewer.content,
+        judgment: null,
+        created_at: new Date().toISOString(),
       })
-      input.sessionId = session.session_id
-      logArtifact(output, `session_id: ${session.session_id}`)
-      await openSessionInWebUi(settings, session.session_id)
+      logArtifact(output, `review_id: ${reviewId}`)
+      logArtifact(output, `session_id: ${sessionId}`)
 
-      logProgress(output, `Session ${session.session_id}: 次のアクションを取得します`)
-      let nextAction = await requestArgos<NextAction>(
-        settings.apiBaseUrl,
-        `/api/sessions/${encodeURIComponent(session.session_id)}/next-action`,
-      )
+      let nextAction: NextAction = {
+        agent: 'EXAMINER',
+        round: 1,
+        status: 'ongoing',
+        final_judgment: null,
+        completion_reason: null,
+      }
 
       while (nextAction.status === 'ongoing' && nextAction.agent) {
         throwIfCancelled(token)
-        logProgress(output, `Session ${session.session_id}: メッセージ履歴を取得します`)
-        const messages = await requestArgos<{ items: DiscussionMessageRecord[] }>(
-          settings.apiBaseUrl,
-          `/api/sessions/${encodeURIComponent(session.session_id)}/messages`,
-        )
 
         if (nextAction.agent === 'EXAMINER') {
           progress.report({
@@ -297,28 +297,24 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
           logStep(output, `Round ${nextAction.round}: Examiner を ${modelNameForStorage(models.examiner)} で実行します`)
           const examinerRaw = await callLanguageModel(
             models.examiner,
-            buildPrompt(examinerPrompt, examinerUserInput(input, messages.items)),
+            buildPrompt(examinerPrompt, examinerUserInput(input, messages)),
             token,
             output,
             `Round ${nextAction.round} Examiner`,
           )
           const examiner = parseJsonObject<ExaminerOutput>(examinerRaw, validateExaminerOutput)
-          logProgress(output, `Round ${nextAction.round} Examiner: ARGOS API に投稿します`)
-          const result = await requestArgos<SubmitMessageResult>(
-            settings.apiBaseUrl,
-            `/api/sessions/${encodeURIComponent(session.session_id)}/messages`,
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                agent: 'EXAMINER',
-                model_name: modelNameForStorage(models.examiner),
-                content: examiner.content,
-                judgment: examiner.judgment,
-              }),
-            },
-          )
+          messages.push({
+            id: messages.length + 1,
+            session_id: sessionId,
+            round: nextAction.round,
+            agent: 'EXAMINER',
+            model_name: modelNameForStorage(models.examiner),
+            content: examiner.content,
+            judgment: examiner.judgment,
+            created_at: new Date().toISOString(),
+          })
           logArtifact(output, `Examiner judgment: ${examiner.judgment}`)
-          nextAction = toNextAction(result)
+          nextAction = nextActionAfterExaminer(nextAction.round, examiner.judgment)
           continue
         }
 
@@ -328,34 +324,72 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         logStep(output, `Round ${nextAction.round}: Rebuttal を ${modelNameForStorage(models.rebuttal)} で実行します`)
         const rebuttalRaw = await callLanguageModel(
           models.rebuttal,
-          buildPrompt(rebuttalPrompt, rebuttalUserInput(input, messages.items)),
+          buildPrompt(rebuttalPrompt, rebuttalUserInput(input, messages)),
           token,
           output,
           `Round ${nextAction.round} Rebuttal`,
         )
         const rebuttal = parseJsonObject<RebuttalOutput>(rebuttalRaw, validateRebuttalOutput)
-        logProgress(output, `Round ${nextAction.round} Rebuttal: ARGOS API に投稿します`)
-        const result = await requestArgos<SubmitMessageResult>(
-          settings.apiBaseUrl,
-          `/api/sessions/${encodeURIComponent(session.session_id)}/messages`,
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              agent: 'REVIEWER',
-              model_name: modelNameForStorage(models.rebuttal),
-              content: rebuttal.content,
-              judgment: null,
-            }),
-          },
-        )
+        messages.push({
+          id: messages.length + 1,
+          session_id: sessionId,
+          round: nextAction.round,
+          agent: 'REBUTTAL',
+          model_name: modelNameForStorage(models.rebuttal),
+          content: rebuttal.content,
+          judgment: null,
+          created_at: new Date().toISOString(),
+        })
         logArtifact(output, 'Rebuttal を投稿しました')
-        nextAction = toNextAction(result)
+        nextAction = {
+          agent: 'EXAMINER',
+          round: nextAction.round,
+          status: 'ongoing',
+          final_judgment: null,
+          completion_reason: null,
+        }
       }
 
-      const finalJudgment = nextAction.final_judgment ?? 'UNKNOWN'
+      if (!nextAction.final_judgment || !nextAction.completion_reason) {
+        throw new Error('レビューの最終判定を確定できませんでした')
+      }
+
+      progress.report({ message: '最終的にバグと判定された指摘を抽出しています' })
+      logStep(output, 'Conclusion: 最終的にバグと判定された指摘だけを抽出します')
+      const conclusionRaw = await callLanguageModel(
+        models.examiner,
+        buildPrompt(conclusionSystemPrompt(), conclusionUserInput(input, messages, nextAction.final_judgment)),
+        token,
+        output,
+        'Conclusion',
+      )
+      const conclusion = parseJsonObject<ConclusionOutput>(conclusionRaw, validateConclusionOutput)
+      throwIfCancelled(token)
+
+      const reportDraft: Omit<ReviewReport, 'markdownUri'> = {
+        reviewId,
+        sessionId,
+        createdAt,
+        purpose,
+        repositoryRoot: collected.repositoryRoot,
+        diffRange: collected.diffRange,
+        conclusionMarkdown: conclusion.content,
+        finalJudgment: nextAction.final_judgment,
+        completionReason: nextAction.completion_reason,
+        models: {
+          reviewer: modelNameForStorage(models.reviewer),
+          examiner: modelNameForStorage(models.examiner),
+          rebuttal: modelNameForStorage(models.rebuttal),
+        },
+        messages,
+      }
+      const markdownUri = await writeMarkdownReport(workspaceFolder.uri.fsPath, reportDraft)
+      const report: ReviewReport = { ...reportDraft, markdownUri }
+      const finalJudgment = report.finalJudgment
       logArtifact(output, `Final judgment: ${finalJudgment}`)
-      logArtifact(output, `Completion reason: ${nextAction.completion_reason ?? 'unknown'}`)
-      await showCompletionMessage(settings, savedReview.review_id, session.session_id, finalJudgment)
+      logArtifact(output, `Completion reason: ${report.completionReason}`)
+      logArtifact(output, `Markdown report: ${report.markdownUri.fsPath}`)
+      await openReviewPreview(context, report)
     },
   )
 }
@@ -382,8 +416,6 @@ async function selectWorkspaceFolder(): Promise<vscode.WorkspaceFolder | undefin
 function readSettings(): ExtensionSettings {
   const config = vscode.workspace.getConfiguration('argos')
   return {
-    apiBaseUrl: config.get('apiBaseUrl', 'http://localhost:3001'),
-    webUiBaseUrl: config.get('webUiBaseUrl', 'http://localhost:8080'),
     includeContext: config.get('includeContext', true),
     contextBudget: config.get('contextBudget', 220_000),
   }
@@ -398,9 +430,10 @@ async function showReviewForm(
     throw new Error('VS Code から利用可能な Language Model が見つかりませんでした')
   }
 
+  const sortedModels = sortModelsForDisplay(availableModels)
   const modelById = new Map(availableModels.map(model => [model.id, model]))
-  const reviewerModels = rankModels(availableModels, reviewerModelKeywords)
-  const examinerModels = rankModels(availableModels, examinerModelKeywords)
+  const defaultReviewer = rankModels(availableModels, reviewerModelKeywords)[0] ?? sortedModels[0]
+  const defaultExaminer = rankModels(availableModels, examinerModelKeywords)[0] ?? sortedModels[0]
   const labels = getReviewFormLabels(vscode.env.language)
   const panel = vscode.window.createWebviewPanel('argosAutoReview', labels.title, vscode.ViewColumn.Active, {
     enableScripts: true,
@@ -412,12 +445,10 @@ async function showReviewForm(
     nonce: createNonce(),
     workspaceName: workspaceFolder.name,
     workspacePath: workspaceFolder.uri.fsPath,
-    apiBaseUrl: settings.apiBaseUrl,
-    webUiBaseUrl: settings.webUiBaseUrl,
-    reviewerModels: reviewerModels.map(serializeModel),
-    examinerModels: examinerModels.map(serializeModel),
-    defaultReviewerId: reviewerModels[0]?.id ?? availableModels[0].id,
-    defaultExaminerId: examinerModels[0]?.id ?? availableModels[0].id,
+    reviewerModels: sortedModels.map(serializeModel),
+    examinerModels: sortedModels.map(serializeModel),
+    defaultReviewerId: defaultReviewer.id,
+    defaultExaminerId: defaultExaminer.id,
     labels,
   })
 
@@ -540,8 +571,6 @@ function renderReviewFormHtml(input: {
   nonce: string
   workspaceName: string
   workspacePath: string
-  apiBaseUrl: string
-  webUiBaseUrl: string
   reviewerModels: SerializedModel[]
   examinerModels: SerializedModel[]
   defaultReviewerId: string
@@ -697,14 +726,6 @@ function renderReviewFormHtml(input: {
           <span class="summary-label">${escapeHtml(labels.workspace)}</span>
           <div class="summary-value">${escapeHtml(input.workspaceName)}<br>${escapeHtml(input.workspacePath)}</div>
         </div>
-        <div class="summary-item">
-          <span class="summary-label">ARGOS API</span>
-          <div class="summary-value">${escapeHtml(input.apiBaseUrl)}</div>
-        </div>
-        <div class="summary-item">
-          <span class="summary-label">Web UI</span>
-          <div class="summary-value">${escapeHtml(input.webUiBaseUrl)}</div>
-        </div>
       </section>
 
       <fieldset>
@@ -812,8 +833,14 @@ function rankModels(models: vscode.LanguageModelChat[], keywords: string[]): vsc
   return [...preferred.sort(compareModels), ...rest.sort(compareModels)]
 }
 
+function sortModelsForDisplay(models: vscode.LanguageModelChat[]): vscode.LanguageModelChat[] {
+  return [...models].sort(compareModels)
+}
+
 function compareModels(left: vscode.LanguageModelChat, right: vscode.LanguageModelChat): number {
-  return left.name.localeCompare(right.name, 'en', { numeric: true, sensitivity: 'base' })
+  const leftLabel = `${left.name} ${left.vendor} ${left.family} ${left.version} ${left.id}`
+  const rightLabel = `${right.name} ${right.vendor} ${right.family} ${right.version} ${right.id}`
+  return leftLabel.localeCompare(rightLabel, 'en', { numeric: true, sensitivity: 'base' })
 }
 
 function modelNameForStorage(model: vscode.LanguageModelChat): string {
@@ -1061,6 +1088,62 @@ function rebuttalUserInput(input: RunInput, messages: DiscussionMessageRecord[])
   return `レビュー観点・要件:\n${input.purpose}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
+function conclusionSystemPrompt(): string {
+  return `あなたは ARGOS の最終結論を作成します。
+
+## 目的
+
+reviewer / examiner / rebuttal の議論から、最終的にバグと判定された指摘だけを抽出してください。
+
+## 制約
+
+- 誤検知、根拠不足、要再検討、前提依存、未確定の指摘は含めない
+- 最終 examiner が妥当と明示した指摘だけを含める
+- 判断が曖昧な指摘は含めない
+- 新しい指摘を作らない
+- バグが 1 件も確定していない場合は「最終的にバグと判定された指摘はありません。」とだけ書く
+
+## 出力
+
+必ず JSON だけを返してください。Markdown フェンスや説明文は付けないでください。
+
+{"content":"Markdown の結論本文"}
+
+## Markdown 形式
+
+確定バグがある場合:
+
+### H1
+
+- 重大度: High | Medium | Low
+- 対象: path/to/file.ext:123
+- バグ:
+- 根拠:
+- 影響:
+- 修正方針:
+
+必要な件数だけ続け、重大度の高い順に並べてください。`
+}
+
+function conclusionUserInput(
+  input: RunInput,
+  messages: DiscussionMessageRecord[],
+  finalJudgment: FinalJudgment,
+): string {
+  return `レビュー観点・要件:
+${input.purpose}
+
+対象 review_id:
+${input.reviewId ?? 'unknown'}
+対象 session_id:
+${input.sessionId ?? 'unknown'}
+最終判定:
+${finalJudgment}
+
+これまでの会話:
+${formatMessages(messages)}`
+}
+
 function formatCodeContext(input: RunInput): string {
   return input.codeContext ? `\n\n関連コードコンテキスト:\n\n${input.codeContext}` : ''
 }
@@ -1192,73 +1275,509 @@ function validateRebuttalOutput(value: unknown): RebuttalOutput {
   return { content: record.content.trim() }
 }
 
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, '')
+function validateConclusionOutput(value: unknown): ConclusionOutput {
+  if (!value || typeof value !== 'object') {
+    throw new Error('conclusion response must be an object')
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.content !== 'string' || !record.content.trim()) {
+    throw new Error('conclusion response must include content')
+  }
+  return { content: record.content.trim() }
 }
 
-async function requestArgos<T>(baseUrl: string, pathName: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${trimTrailingSlash(baseUrl)}${pathName}`, {
-    ...init,
-    headers: {
-      'content-type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-  })
+function createLocalId(prefix: string): string {
+  return `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 16)}`
+}
 
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(`ARGOS API ${pathName} failed (${response.status}): ${text}`)
+function nextActionAfterExaminer(round: number, judgment: FinalJudgment): NextAction {
+  if (judgment === 'OK') {
+    return {
+      agent: null,
+      round,
+      status: 'finished',
+      final_judgment: 'OK',
+      completion_reason: 'approved',
+    }
   }
 
-  return (await response.json()) as T
-}
+  if (round >= 3) {
+    return {
+      agent: null,
+      round,
+      status: 'finished',
+      final_judgment: 'NG',
+      completion_reason: 'max_rounds_reached',
+    }
+  }
 
-function toNextAction(result: SubmitMessageResult): NextAction {
   return {
-    agent: result.next_actor,
-    round: result.current_round,
-    status: result.status,
-    final_judgment: result.final_judgment,
-    completion_reason: result.completion_reason,
+    agent: 'REBUTTAL',
+    round: round + 1,
+    status: 'ongoing',
+    final_judgment: null,
+    completion_reason: null,
   }
 }
 
-async function showCompletionMessage(
-  settings: ExtensionSettings,
-  reviewId: string,
-  sessionId: string,
-  finalJudgment: string,
-): Promise<void> {
-  const openSession = 'Open session'
-  const openReview = 'Open review'
-  const selected = await vscode.window.showInformationMessage(
-    `ARGOS auto review finished: ${finalJudgment} (review_id: ${reviewId}, session_id: ${sessionId})`,
-    openSession,
-    openReview,
+async function writeMarkdownReport(
+  workspaceRoot: string,
+  report: Omit<ReviewReport, 'markdownUri'>,
+): Promise<vscode.Uri> {
+  const directoryUri = vscode.Uri.file(workspaceRoot)
+  const fileName = `${toFileTimestamp(report.createdAt)}-${report.finalJudgment.toLowerCase()}-${report.sessionId}.md`
+  const reportUri = vscode.Uri.joinPath(directoryUri, fileName)
+  await vscode.workspace.fs.writeFile(reportUri, textEncoder.encode(renderReportMarkdown(report)))
+  return reportUri
+}
+
+function toFileTimestamp(value: string): string {
+  return value.replace(/[:.]/g, '-').replace(/Z$/, 'Z')
+}
+
+function renderReportMarkdown(report: Omit<ReviewReport, 'markdownUri'>): string {
+  const lines = [
+    '# ARGOS Review',
+    '',
+    `- Final judgment: ${report.finalJudgment}`,
+    `- Completion reason: ${report.completionReason}`,
+    `- Review ID: ${report.reviewId}`,
+    `- Session ID: ${report.sessionId}`,
+    `- Created: ${report.createdAt}`,
+    `- Repository: ${report.repositoryRoot}`,
+    `- Diff range: ${report.diffRange}`,
+    `- Reviewer model: ${report.models.reviewer}`,
+    `- Examiner model: ${report.models.examiner}`,
+    `- Rebuttal model: ${report.models.rebuttal}`,
+    '',
+    '## Review Requirements',
+    '',
+    report.purpose,
+    '',
+    '## Conclusion',
+    '',
+    report.conclusionMarkdown,
+    '',
+    '## Discussion',
+    '',
+  ]
+
+  for (const message of report.messages) {
+    const judgment = message.judgment ? ` (${message.judgment})` : ''
+    lines.push(`### Round ${message.round} - ${formatAgentLabel(message.agent)}${judgment}`)
+    lines.push('')
+    lines.push(`- Model: ${message.model_name ?? 'Unknown'}`)
+    lines.push(`- Created: ${message.created_at}`)
+    lines.push('')
+    lines.push(message.content)
+    lines.push('')
+  }
+
+  return `${lines.join('\n').trim()}\n`
+}
+
+async function openReviewPreview(context: vscode.ExtensionContext, report: ReviewReport): Promise<void> {
+  const panel = vscode.window.createWebviewPanel(
+    'argosReviewPreview',
+    `ARGOS Review ${report.finalJudgment}`,
+    vscode.ViewColumn.Active,
+    { enableScripts: true, retainContextWhenHidden: true },
   )
 
-  if (selected === openSession) {
-    await openSessionInWebUi(settings, sessionId)
-  }
+  panel.webview.html = renderReviewPreviewHtml({
+    cspSource: panel.webview.cspSource,
+    nonce: createNonce(),
+    report,
+  })
 
-  if (selected === openReview) {
-    await openWebUiPath(settings, '/reviews')
-  }
+  const disposable = panel.webview.onDidReceiveMessage(async message => {
+    if (!message || typeof message !== 'object') {
+      return
+    }
+
+    const record = message as Record<string, unknown>
+    if (record.command === 'openMarkdown') {
+      await vscode.window.showTextDocument(report.markdownUri, { preview: false })
+    }
+  })
+  context.subscriptions.push(disposable)
 }
 
-async function openSessionInWebUi(settings: ExtensionSettings, sessionId: string): Promise<void> {
-  await openWebUiPath(settings, `/sessions/${sessionId}`)
+function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; report: ReviewReport }): string {
+  const report = input.report
+  const judgmentClass = report.finalJudgment === 'OK' ? 'ok' : 'ng'
+  const messageCards = report.messages.map(renderMessageCardHtml).join('')
+  const markdownPath = vscode.workspace.asRelativePath(report.markdownUri, false)
+
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${input.cspSource} 'unsafe-inline'; script-src 'nonce-${input.nonce}';">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ARGOS Review</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      line-height: 1.6;
+    }
+    .shell {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 28px 24px 48px;
+    }
+    .header {
+      display: grid;
+      gap: 18px;
+      margin-bottom: 22px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .title-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 650;
+    }
+    h2 {
+      margin: 28px 0 12px;
+      font-size: 18px;
+      font-weight: 650;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 2px 10px;
+      border-radius: 999px;
+      border: 1px solid currentColor;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    .badge.ok {
+      color: var(--vscode-testing-iconPassed, #2da44e);
+      background: color-mix(in srgb, var(--vscode-testing-iconPassed, #2da44e) 12%, transparent);
+    }
+    .badge.ng {
+      color: var(--vscode-testing-iconFailed, #cf222e);
+      background: color-mix(in srgb, var(--vscode-testing-iconFailed, #cf222e) 12%, transparent);
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .meta-item {
+      min-width: 0;
+      padding: 10px 12px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editorWidget-background);
+    }
+    .meta-label {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .meta-value {
+      overflow-wrap: anywhere;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+    button {
+      min-height: 32px;
+      padding: 5px 12px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 4px;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      cursor: pointer;
+      font: inherit;
+    }
+    button:hover { background: var(--vscode-button-hoverBackground); }
+    .path {
+      color: var(--vscode-descriptionForeground);
+      overflow-wrap: anywhere;
+    }
+    .purpose,
+    .conclusion,
+    .message-card {
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editorWidget-background);
+    }
+    .purpose,
+    .conclusion {
+      padding: 14px 16px;
+    }
+    .purpose {
+      white-space: pre-wrap;
+    }
+    .message-list {
+      display: grid;
+      gap: 14px;
+    }
+    .message-card {
+      overflow: hidden;
+    }
+    .message-header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-sideBar-background);
+    }
+    .message-title {
+      font-weight: 700;
+    }
+    .model {
+      color: var(--vscode-descriptionForeground);
+      overflow-wrap: anywhere;
+    }
+    .message-body {
+      padding: 14px 18px 18px;
+    }
+    .markdown h1,
+    .markdown h2,
+    .markdown h3,
+    .markdown h4 {
+      margin: 18px 0 8px;
+      line-height: 1.3;
+    }
+    .markdown h1 { font-size: 21px; }
+    .markdown h2 { font-size: 18px; }
+    .markdown h3 { font-size: 16px; }
+    .markdown h4 { font-size: 14px; }
+    .markdown p { margin: 8px 0; }
+    .markdown ul,
+    .markdown ol { margin: 8px 0 8px 22px; padding: 0; }
+    .markdown li { margin: 3px 0; }
+    .markdown code {
+      padding: 1px 4px;
+      border-radius: 4px;
+      background: var(--vscode-textCodeBlock-background);
+      font-family: var(--vscode-editor-font-family);
+    }
+    .markdown pre {
+      overflow: auto;
+      padding: 12px;
+      border-radius: 6px;
+      background: var(--vscode-textCodeBlock-background);
+    }
+    .markdown pre code { padding: 0; background: transparent; }
+    .markdown blockquote {
+      margin: 10px 0;
+      padding-left: 12px;
+      border-left: 3px solid var(--vscode-panel-border);
+      color: var(--vscode-descriptionForeground);
+    }
+    .markdown hr {
+      border: 0;
+      border-top: 1px solid var(--vscode-panel-border);
+      margin: 16px 0;
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div class="title-row">
+        <h1>ARGOS Review</h1>
+        <span class="badge ${judgmentClass}">${escapeHtml(report.finalJudgment)}</span>
+      </div>
+      <div class="meta-grid">
+        ${renderMetaItem('Completion', report.completionReason)}
+        ${renderMetaItem('Review ID', report.reviewId)}
+        ${renderMetaItem('Session ID', report.sessionId)}
+        ${renderMetaItem('Created', report.createdAt)}
+        ${renderMetaItem('Repository', report.repositoryRoot)}
+        ${renderMetaItem('Diff Range', report.diffRange)}
+        ${renderMetaItem('Reviewer Model', report.models.reviewer)}
+        ${renderMetaItem('Examiner Model', report.models.examiner)}
+        ${renderMetaItem('Rebuttal Model', report.models.rebuttal)}
+      </div>
+      <div class="actions">
+        <button id="open-markdown" type="button">Open Markdown</button>
+        <span class="path">${escapeHtml(markdownPath)}</span>
+      </div>
+    </header>
+
+    <section>
+      <h2>Review Requirements</h2>
+      <div class="purpose">${escapeHtml(report.purpose)}</div>
+    </section>
+
+    <section>
+      <h2>Conclusion</h2>
+      <div class="conclusion markdown">${renderMarkdownToHtml(report.conclusionMarkdown)}</div>
+    </section>
+
+    <section>
+      <h2>Discussion</h2>
+      <div class="message-list">${messageCards}</div>
+    </section>
+  </main>
+  <script nonce="${input.nonce}">
+    const vscode = acquireVsCodeApi();
+    document.getElementById('open-markdown').addEventListener('click', () => {
+      vscode.postMessage({ command: 'openMarkdown' });
+    });
+  </script>
+</body>
+</html>`
 }
 
-async function openWebUiPath(settings: ExtensionSettings, pathName: string): Promise<void> {
-  const rawUri = vscode.Uri.parse(`${trimTrailingSlash(settings.webUiBaseUrl)}${pathName}`)
-  const browserUri = await vscode.env.asExternalUri(rawUri)
+function renderMetaItem(label: string, value: string): string {
+  return `<div class="meta-item"><span class="meta-label">${escapeHtml(label)}</span><div class="meta-value">${escapeHtml(value)}</div></div>`
+}
 
-  try {
-    await vscode.commands.executeCommand('simpleBrowser.show', browserUri.toString())
-  } catch {
-    await vscode.env.openExternal(browserUri)
+function renderMessageCardHtml(message: DiscussionMessageRecord): string {
+  const judgment = message.judgment
+    ? ` <span class="badge ${message.judgment === 'OK' ? 'ok' : 'ng'}">${message.judgment}</span>`
+    : ''
+  return `<article class="message-card">
+    <div class="message-header">
+      <div class="message-title">Round ${message.round} - ${escapeHtml(formatAgentLabel(message.agent))}${judgment}</div>
+      <div class="model">${escapeHtml(message.model_name ?? 'Unknown')}</div>
+    </div>
+    <div class="message-body markdown">${renderMarkdownToHtml(message.content)}</div>
+  </article>`
+}
+
+function renderMarkdownToHtml(markdown: string): string {
+  const blocks: string[] = []
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n')
+  let index = 0
+
+  while (index < lines.length) {
+    const line = lines[index]
+    const trimmed = line.trim()
+
+    if (!trimmed) {
+      index += 1
+      continue
+    }
+
+    const fence = trimmed.match(/^```(.*)$/)
+    if (fence) {
+      const language = fence[1].trim()
+      const codeLines: string[] = []
+      index += 1
+      while (index < lines.length && !lines[index].trim().startsWith('```')) {
+        codeLines.push(lines[index])
+        index += 1
+      }
+      if (index < lines.length) {
+        index += 1
+      }
+      const className = language ? ` class="language-${escapeAttribute(language)}"` : ''
+      blocks.push(`<pre><code${className}>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+      continue
+    }
+
+    const heading = trimmed.match(/^(#{1,4})\s+(.+)$/)
+    if (heading) {
+      const level = heading[1].length
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`)
+      index += 1
+      continue
+    }
+
+    if (/^---+$/.test(trimmed)) {
+      blocks.push('<hr>')
+      index += 1
+      continue
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: string[] = []
+      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+        items.push(`<li>${renderInlineMarkdown(lines[index].trim().replace(/^[-*]\s+/, ''))}</li>`)
+        index += 1
+      }
+      blocks.push(`<ul>${items.join('')}</ul>`)
+      continue
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items: string[] = []
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index].trim())) {
+        items.push(`<li>${renderInlineMarkdown(lines[index].trim().replace(/^\d+\.\s+/, ''))}</li>`)
+        index += 1
+      }
+      blocks.push(`<ol>${items.join('')}</ol>`)
+      continue
+    }
+
+    if (trimmed.startsWith('>')) {
+      const quoteLines: string[] = []
+      while (index < lines.length && lines[index].trim().startsWith('>')) {
+        quoteLines.push(lines[index].trim().replace(/^>\s?/, ''))
+        index += 1
+      }
+      blocks.push(`<blockquote>${quoteLines.map(renderInlineMarkdown).join('<br>')}</blockquote>`)
+      continue
+    }
+
+    const paragraph: string[] = [trimmed]
+    index += 1
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index].trim())) {
+      paragraph.push(lines[index].trim())
+      index += 1
+    }
+    blocks.push(`<p>${renderInlineMarkdown(paragraph.join(' '))}</p>`)
   }
+
+  return blocks.join('\n')
+}
+
+function isMarkdownBlockStart(trimmedLine: string): boolean {
+  return (
+    /^```/.test(trimmedLine) ||
+    /^(#{1,4})\s+/.test(trimmedLine) ||
+    /^[-*]\s+/.test(trimmedLine) ||
+    /^\d+\.\s+/.test(trimmedLine) ||
+    /^---+$/.test(trimmedLine) ||
+    trimmedLine.startsWith('>')
+  )
+}
+
+function renderInlineMarkdown(value: string): string {
+  return escapeHtml(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+}
+
+function formatAgentLabel(agent: MessageAgent): string {
+  if (agent === 'REVIEWER') {
+    return 'Reviewer'
+  }
+  if (agent === 'EXAMINER') {
+    return 'Examiner'
+  }
+  return 'Rebuttal'
 }
 
 function throwIfCancelled(token: vscode.CancellationToken): void {

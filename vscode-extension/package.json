@@ -2,7 +2,7 @@
   "name": "argos-vscode-extension",
   "displayName": "ARGOS Auto Review",
   "description": "Run ARGOS auto review with VS Code Copilot language models.",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "private": true,
   "publisher": "argos",
   "repository": {
@@ -27,16 +27,6 @@
     "configuration": {
       "title": "ARGOS",
       "properties": {
-        "argos.apiBaseUrl": {
-          "type": "string",
-          "default": "http://localhost:3001",
-          "description": "Base URL for the ARGOS REST API."
-        },
-        "argos.webUiBaseUrl": {
-          "type": "string",
-          "default": "http://localhost:8080",
-          "description": "Base URL for the ARGOS Web UI."
-        },
         "argos.includeContext": {
           "type": "boolean",
           "default": true,

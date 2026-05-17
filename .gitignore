@@ -1,6 +1,9 @@
 mcp-server/node_modules
 mcp-server/dist
 mcp-server/data
+vscode-extension/node_modules
+vscode-extension/dist
+vscode-extension/*.vsix
 web-ui/node_modules
 web-ui/.next
 *.log

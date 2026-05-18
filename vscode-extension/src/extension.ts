@@ -74,6 +74,7 @@ interface ReviewFormResult {
 
 interface SerializedModel {
   id: string
+  label: string
   name: string
   description: string
   detail: string
@@ -180,6 +181,27 @@ const examinerModelKeywords = [
   'claude-sonnet',
   'claude sonnet',
   'gemini',
+]
+
+const premiumRequestMultiplierRules: Array<{ pattern: RegExp; multiplier: string }> = [
+  { pattern: /claude[\s._-]*opus[\s._-]*4[\s._-]*7\b/i, multiplier: '15x' },
+  { pattern: /claude[\s._-]*opus[\s._-]*4[\s._-]*6\b/i, multiplier: '3x' },
+  { pattern: /claude[\s._-]*opus[\s._-]*4[\s._-]*5\b/i, multiplier: '3x' },
+  { pattern: /claude[\s._-]*sonnet[\s._-]*4[\s._-]*6\b/i, multiplier: '1x' },
+  { pattern: /claude[\s._-]*sonnet[\s._-]*4[\s._-]*5\b/i, multiplier: '1x' },
+  { pattern: /claude[\s._-]*haiku[\s._-]*4[\s._-]*5\b/i, multiplier: '0.33x' },
+  { pattern: /gemini[\s._-]*3(?:[\s._-]*flash|\s+flash).*preview/i, multiplier: '0.33x' },
+  { pattern: /gemini[\s._-]*3[\s._-]*1[\s._-]*pro.*preview/i, multiplier: '1x' },
+  { pattern: /gemini[\s._-]*2[\s._-]*5[\s._-]*pro\b/i, multiplier: '1x' },
+  { pattern: /gpt[\s._-]*5[\s._-]*5\b/i, multiplier: '7.5x' },
+  { pattern: /gpt[\s._-]*5[\s._-]*4[\s._-]*mini\b/i, multiplier: '0.33x' },
+  { pattern: /gpt[\s._-]*5[\s._-]*4\b/i, multiplier: '1x' },
+  { pattern: /gpt[\s._-]*5[\s._-]*3[\s._-]*codex\b/i, multiplier: '1x' },
+  { pattern: /gpt[\s._-]*5[\s._-]*2[\s._-]*codex\b/i, multiplier: '1x' },
+  { pattern: /gpt[\s._-]*5[\s._-]*2\b/i, multiplier: '1x' },
+  { pattern: /gpt[\s._-]*5(?![\s._-]*\d)(?:[\s._-]+mini)?\b/i, multiplier: '0x' },
+  { pattern: /gpt[\s._-]*4[\s._-]*1\b/i, multiplier: '0x' },
+  { pattern: /gpt[\s._-]*4o\b/i, multiplier: '0x' },
 ]
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -513,8 +535,10 @@ async function getAvailableLanguageModels(): Promise<vscode.LanguageModelChat[]>
 }
 
 function serializeModel(model: vscode.LanguageModelChat): SerializedModel {
+  const premiumLabel = getPremiumRequestLabel(model)
   return {
     id: model.id,
+    label: `${model.name} (${premiumLabel})`,
     name: model.name,
     description: modelFamilyDescription(model),
     detail: `${model.id} / max input ${model.maxInputTokens.toLocaleString()} tokens`,
@@ -786,7 +810,7 @@ function renderModelOptions(models: SerializedModel[], selectedId: string): stri
   return models
     .map(model => {
       const selected = model.id === selectedId ? ' selected' : ''
-      return `<option value="${escapeAttribute(model.id)}"${selected}>${escapeHtml(model.name)} - ${escapeHtml(model.description || model.detail)}</option>`
+      return `<option value="${escapeAttribute(model.id)}"${selected}>${escapeHtml(model.label)}</option>`
     })
     .join('')
 }
@@ -815,6 +839,22 @@ function escapeAttribute(value: string): string {
 
 function modelFamilyDescription(model: vscode.LanguageModelChat): string {
   return [model.vendor, model.family, model.version].filter(Boolean).join(' / ')
+}
+
+function getPremiumRequestLabel(model: vscode.LanguageModelChat): string {
+  if (isAutoModel(model)) {
+    return '10% discount'
+  }
+
+  const haystack = [model.name, model.id, model.vendor, model.family, model.version].filter(Boolean).join(' ')
+  const matchedRule = premiumRequestMultiplierRules.find(rule => rule.pattern.test(haystack))
+  return matchedRule?.multiplier ?? '1x'
+}
+
+function isAutoModel(model: vscode.LanguageModelChat): boolean {
+  return [model.name, model.id, model.family].some(
+    value => typeof value === 'string' && value.trim().toLowerCase() === 'auto',
+  )
 }
 
 function rankModels(models: vscode.LanguageModelChat[], keywords: string[]): vscode.LanguageModelChat[] {

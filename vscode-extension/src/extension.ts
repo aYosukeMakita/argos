@@ -1117,15 +1117,15 @@ function buildPrompt(systemPrompt: string, userPrompt: string): string {
 }
 
 function reviewerUserInput(input: RunInput): string {
-  return `レビュー観点・要件:\n${input.purpose}\n\nリポジトリ:\n${input.repositoryRoot}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+  return `${formatReviewRequirements(input)}\n\nリポジトリ:\n${input.repositoryRoot}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
 function examinerUserInput(input: RunInput, messages: DiscussionMessageRecord[]): string {
-  return `レビュー観点・要件:\n${input.purpose}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+  return `${formatReviewRequirements(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
 function rebuttalUserInput(input: RunInput, messages: DiscussionMessageRecord[]): string {
-  return `レビュー観点・要件:\n${input.purpose}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+  return `${formatReviewRequirements(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
 function conclusionSystemPrompt(): string {
@@ -1170,8 +1170,7 @@ function conclusionUserInput(
   messages: DiscussionMessageRecord[],
   finalJudgment: FinalJudgment,
 ): string {
-  return `レビュー観点・要件:
-${input.purpose}
+  return `${formatReviewRequirements(input)}
 
 対象 review_id:
 ${input.reviewId ?? 'unknown'}
@@ -1182,6 +1181,13 @@ ${finalJudgment}
 
 これまでの会話:
 ${formatMessages(messages)}`
+}
+
+function formatReviewRequirements(input: RunInput): string {
+  return `レビュー観点・要件（Markdown 原文）:
+<<<ARGOS_REVIEW_REQUIREMENTS_MARKDOWN
+${input.purpose}
+ARGOS_REVIEW_REQUIREMENTS_MARKDOWN>>>`
 }
 
 function formatCodeContext(input: RunInput): string {

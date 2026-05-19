@@ -1,29 +1,57 @@
-# ARGOS Auto Review VS Code Extension
+# ARGOS 自動レビュー VS Code 拡張
 
-This private extension runs ARGOS auto review from inside VS Code using the Copilot Language Model API.
+この private 拡張は、Copilot Language Model API を使って VS Code 内から ARGOS 自動レビューを実行します。
 
-## Usage
+## 使い方
 
-1. Open the target repository in VS Code.
-2. Run `ARGOS: Start Auto Review` from the Command Palette.
-3. Pick reviewer, examiner, and rebuttal models in the ARGOS Webview form.
-4. Enter optional review requirements as multiline Markdown.
+1. レビュー対象のリポジトリを VS Code で開きます。
+2. コマンドパレットから `ARGOS: 自動レビューを開始` を実行します。
+3. ARGOS の Webview フォームで preset を選び、モデル欄で reviewer、examiner、rebuttal を選択します。
+4. 必要に応じてレビュー観点を複数行 Markdown で入力します。
 
-The extension generates the review diff internally using the same style as `gd-review`: it infers a base branch and sends the equivalent of `git diff "${baseBranch}...HEAD"`. You do not need to create `diff.patch` manually.
+preset を選択すると、reviewer、examiner、rebuttal のモデル欄が preset の内容に合わせて自動更新されます。その後に個別のモデル欄を変更し、同じ組み合わせの preset が存在しない状態になると、preset 欄は空欄になります。
 
-The extension runs the full reviewer / examiner / rebuttal discussion locally in the extension process. When the review finishes, it saves a Markdown report at the root of the opened workspace folder and opens a decorated ARGOS Webview preview with the final judgment badge, model names, a confirmed-bugs conclusion, metadata, and round-by-round discussion.
+この拡張は `gd-review` と同じ考え方でレビュー用 diff を内部生成します。base branch を推定し、`git diff "${baseBranch}...HEAD"` 相当の差分を送信するため、手動で `diff.patch` を作成する必要はありません。
 
-The input form uses the VS Code display language. Japanese VS Code shows Japanese labels; other languages use English labels.
+拡張プロセス内で reviewer / examiner / rebuttal の議論を最後まで実行します。レビューが完了すると、開いているワークスペースフォルダーのルートに Markdown レポートを保存し、最終判定バッジ、モデル名、確定バグの結論、メタデータ、ラウンドごとの議論を含む ARGOS Webview プレビューを開きます。
 
-## Build VSIX
+入力フォームは VS Code の表示言語に従います。日本語の VS Code では日本語ラベル、それ以外の言語では英語ラベルを表示します。
+
+## VSIX のビルド
 
 ```bash
 npm run build
 ```
 
-Install the generated `argos-vscode-extension-*.vsix` with `Extensions: Install from VSIX...`.
+生成された `argos-vscode-extension-*.vsix` は、`Extensions: Install from VSIX...` からインストールします。
 
-## Settings
+## 設定
 
-- `argos.includeContext`: Include changed file contents and common metadata files. Default: `true`.
-- `argos.contextBudget`: Maximum additional context characters. Default: `220000`.
+- `argos.includeContext`: 変更ファイルの内容と一般的なメタデータファイルを追加コンテキストに含めます。既定値は `true` です。
+- `argos.contextBudget`: 各モデルリクエストへ送信する追加コンテキストの最大文字数です。既定値は `220000` です。
+- `argos.activePreset`: 既定選択として使うモデル preset 名です。
+- `argos.presets`: reviewer / examiner / rebuttal の名前付きモデル preset です。リポジトリや worktree をまたいで同じ個人用 preset を使いたい場合は、VS Code の User Settings に設定します。
+
+User Settings JSON の例:
+
+```json
+{
+	"argos.activePreset": "balanced",
+	"argos.presets": {
+		"balanced": {
+			"label": "Balanced",
+			"reviewer": { "model": "Claude Opus 4.7" },
+			"examiner": { "model": "GPT-5.4" },
+			"rebuttal": { "model": "Claude Sonnet 4.6" }
+		},
+		"strict": {
+			"label": "Strict",
+			"reviewer": { "model": "GPT-5.5" },
+			"examiner": { "model": "Claude Opus 4.7" },
+			"rebuttal": { "model": "GPT-5.4" }
+		}
+	}
+}
+```
+
+`model` の値には、内部 model ID ではなく、VS Code 上でユーザーに表示されるモデルラベルを指定します。

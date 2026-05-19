@@ -13,6 +13,22 @@ type CompletionReason = 'approved' | 'max_rounds_reached'
 interface ExtensionSettings {
   includeContext: boolean
   contextBudget: number
+  activePreset: string
+  presets: Record<string, ModelPreset>
+}
+
+type ModelPresetRoleName = 'reviewer' | 'examiner' | 'rebuttal'
+
+interface ModelPresetRole {
+  model: string
+}
+
+interface ModelPreset {
+  label?: string
+  description?: string
+  reviewer?: ModelPresetRole
+  examiner?: ModelPresetRole
+  rebuttal?: ModelPresetRole
 }
 
 interface DiscussionMessageRecord {
@@ -80,12 +96,22 @@ interface SerializedModel {
   detail: string
 }
 
+interface SerializedPreset {
+  name: string
+  label: string
+  reviewerModelId: string
+  examinerModelId: string
+  rebuttalModelId: string
+}
+
 interface ReviewFormLabels {
   htmlLang: string
   title: string
   connectionAriaLabel: string
   workspace: string
+  presetGroup: string
   models: string
+  preset: string
   reviewRequirements: string
   reviewRequirementsPlaceholder: string
   cancel: string
@@ -440,6 +466,8 @@ function readSettings(): ExtensionSettings {
   return {
     includeContext: config.get('includeContext', true),
     contextBudget: config.get('contextBudget', 220_000),
+    activePreset: config.get('activePreset', '').trim(),
+    presets: normalizeModelPresets(config.get('presets', {})),
   }
 }
 
@@ -454,8 +482,13 @@ async function showReviewForm(
 
   const sortedModels = sortModelsForDisplay(availableModels)
   const modelById = new Map(availableModels.map(model => [model.id, model]))
-  const defaultReviewer = rankModels(availableModels, reviewerModelKeywords)[0] ?? sortedModels[0]
-  const defaultExaminer = rankModels(availableModels, examinerModelKeywords)[0] ?? sortedModels[0]
+  const presetModels = resolveActivePresetModels(settings, availableModels)
+  const serializedPresets = serializePresets(settings, availableModels)
+  const defaultReviewer =
+    presetModels?.reviewer ?? rankModels(availableModels, reviewerModelKeywords)[0] ?? sortedModels[0]
+  const defaultExaminer =
+    presetModels?.examiner ?? rankModels(availableModels, examinerModelKeywords)[0] ?? sortedModels[0]
+  const defaultRebuttal = presetModels?.rebuttal ?? defaultExaminer
   const labels = getReviewFormLabels(vscode.env.language)
   const panel = vscode.window.createWebviewPanel('argosAutoReview', labels.title, vscode.ViewColumn.Active, {
     enableScripts: true,
@@ -467,10 +500,13 @@ async function showReviewForm(
     nonce: createNonce(),
     workspaceName: workspaceFolder.name,
     workspacePath: workspaceFolder.uri.fsPath,
+    presets: serializedPresets,
+    defaultPresetName: presetModels ? settings.activePreset : '',
     reviewerModels: sortedModels.map(serializeModel),
     examinerModels: sortedModels.map(serializeModel),
     defaultReviewerId: defaultReviewer.id,
     defaultExaminerId: defaultExaminer.id,
+    defaultRebuttalId: defaultRebuttal.id,
     labels,
   })
 
@@ -557,6 +593,127 @@ function getModelById(modelById: Map<string, vscode.LanguageModelChat>, value: u
   return model
 }
 
+function normalizeModelPresets(value: unknown): Record<string, ModelPreset> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+
+  const presets: Record<string, ModelPreset> = {}
+  for (const [presetName, presetValue] of Object.entries(value)) {
+    if (!presetName || !presetValue || typeof presetValue !== 'object' || Array.isArray(presetValue)) {
+      continue
+    }
+
+    const record = presetValue as Record<string, unknown>
+    presets[presetName] = {
+      label: normalizeOptionalString(record.label),
+      description: normalizeOptionalString(record.description),
+      reviewer: normalizePresetRole(record.reviewer),
+      examiner: normalizePresetRole(record.examiner),
+      rebuttal: normalizePresetRole(record.rebuttal),
+    }
+  }
+  return presets
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function normalizePresetRole(value: unknown): ModelPresetRole | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined
+  }
+
+  const model = normalizeOptionalString((value as Record<string, unknown>).model)
+  return model ? { model } : undefined
+}
+
+function resolveActivePresetModels(
+  settings: ExtensionSettings,
+  availableModels: vscode.LanguageModelChat[],
+): SelectedModels | undefined {
+  if (!settings.activePreset) {
+    return undefined
+  }
+
+  const preset = settings.presets[settings.activePreset]
+  if (!preset) {
+    throw new Error(`ARGOS preset "${settings.activePreset}" is not defined in argos.presets`)
+  }
+
+  return resolvePresetModels(settings.activePreset, preset, availableModels)
+}
+
+function serializePresets(
+  settings: ExtensionSettings,
+  availableModels: vscode.LanguageModelChat[],
+): SerializedPreset[] {
+  return Object.entries(settings.presets).map(([presetName, preset]) => {
+    const models = resolvePresetModels(presetName, preset, availableModels)
+    return {
+      name: presetName,
+      label: preset.label ?? presetName,
+      reviewerModelId: models.reviewer.id,
+      examinerModelId: models.examiner.id,
+      rebuttalModelId: models.rebuttal.id,
+    }
+  })
+}
+
+function resolvePresetModels(
+  presetName: string,
+  preset: ModelPreset,
+  availableModels: vscode.LanguageModelChat[],
+): SelectedModels {
+  return {
+    reviewer: resolvePresetRoleModel(presetName, preset, 'reviewer', availableModels),
+    examiner: resolvePresetRoleModel(presetName, preset, 'examiner', availableModels),
+    rebuttal: resolvePresetRoleModel(presetName, preset, 'rebuttal', availableModels),
+  }
+}
+
+function resolvePresetRoleModel(
+  presetName: string,
+  preset: ModelPreset,
+  roleName: ModelPresetRoleName,
+  availableModels: vscode.LanguageModelChat[],
+): vscode.LanguageModelChat {
+  const role = preset[roleName]
+  if (!role) {
+    throw new Error(`ARGOS preset "${presetName}" must define ${roleName}.model`)
+  }
+
+  const matches = availableModels.filter(model =>
+    getUserVisibleModelLabels(model).some(label => normalizeModelLabel(label) === normalizeModelLabel(role.model)),
+  )
+  if (matches.length === 1) {
+    return matches[0]
+  }
+
+  if (matches.length > 1) {
+    const matchedLabels = matches.map(model => modelNameForStorage(model)).join(', ')
+    throw new Error(`ARGOS preset "${presetName}" ${roleName}.model "${role.model}" is ambiguous: ${matchedLabels}`)
+  }
+
+  throw new Error(
+    `ARGOS preset "${presetName}" ${roleName}.model "${role.model}" does not match an available model label. Available labels: ${formatAvailableModelLabels(availableModels)}`,
+  )
+}
+
+function getUserVisibleModelLabels(model: vscode.LanguageModelChat): string[] {
+  return Array.from(new Set([model.name, serializeModel(model).label].filter(Boolean)))
+}
+
+function normalizeModelLabel(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function formatAvailableModelLabels(models: vscode.LanguageModelChat[]): string {
+  const labels = Array.from(new Set(sortModelsForDisplay(models).map(model => model.name))).slice(0, 20)
+  return labels.join(', ')
+}
+
 function getReviewFormLabels(language: string): ReviewFormLabels {
   const normalizedLanguage = language.toLowerCase()
   const isJapanese = normalizedLanguage === 'ja' || normalizedLanguage.startsWith('ja-')
@@ -567,7 +724,9 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
       title: 'ARGOS 自動レビュー',
       connectionAriaLabel: '接続先',
       workspace: 'ワークスペース',
+      presetGroup: 'プリセット',
       models: 'モデル',
+      preset: 'Preset',
       reviewRequirements: 'レビュー観点',
       reviewRequirementsPlaceholder: 'Markdown でレビュー観点や追加要件を書けます',
       cancel: 'キャンセル',
@@ -581,7 +740,9 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
     title: 'ARGOS Auto Review',
     connectionAriaLabel: 'Connection targets',
     workspace: 'Workspace',
+    presetGroup: 'Preset',
     models: 'Models',
+    preset: 'Preset',
     reviewRequirements: 'Review requirements',
     reviewRequirementsPlaceholder: 'Write review requirements or extra context in Markdown',
     cancel: 'Cancel',
@@ -595,14 +756,20 @@ function renderReviewFormHtml(input: {
   nonce: string
   workspaceName: string
   workspacePath: string
+  presets: SerializedPreset[]
+  defaultPresetName: string
   reviewerModels: SerializedModel[]
   examinerModels: SerializedModel[]
   defaultReviewerId: string
   defaultExaminerId: string
+  defaultRebuttalId: string
   labels: ReviewFormLabels
 }): string {
+  const presetOptions = renderPresetOptions(input.presets, input.defaultPresetName)
   const reviewerOptions = renderModelOptions(input.reviewerModels, input.defaultReviewerId)
   const examinerOptions = renderModelOptions(input.examinerModels, input.defaultExaminerId)
+  const rebuttalOptions = renderModelOptions(input.examinerModels, input.defaultRebuttalId)
+  const presetsJson = jsonForInlineScript(input.presets)
   const labels = input.labels
 
   return `<!DOCTYPE html>
@@ -753,6 +920,14 @@ function renderReviewFormHtml(input: {
       </section>
 
       <fieldset>
+        <legend>${escapeHtml(labels.presetGroup)}</legend>
+        <div>
+          <label for="model-preset">${escapeHtml(labels.preset)}</label>
+          <select id="model-preset">${presetOptions}</select>
+        </div>
+      </fieldset>
+
+      <fieldset>
         <legend>${escapeHtml(labels.models)}</legend>
         <div>
           <label for="reviewer-model">Reviewer</label>
@@ -764,7 +939,7 @@ function renderReviewFormHtml(input: {
         </div>
         <div>
           <label for="rebuttal-model">Rebuttal</label>
-          <select id="rebuttal-model" required>${examinerOptions}</select>
+          <select id="rebuttal-model" required>${rebuttalOptions}</select>
         </div>
       </fieldset>
 
@@ -782,10 +957,34 @@ function renderReviewFormHtml(input: {
 
   <script nonce="${input.nonce}">
     const vscode = acquireVsCodeApi();
+    const presets = ${presetsJson};
     const form = document.getElementById('review-form');
+    const modelPreset = document.getElementById('model-preset');
+    const reviewerModel = document.getElementById('reviewer-model');
     const examinerModel = document.getElementById('examiner-model');
     const rebuttalModel = document.getElementById('rebuttal-model');
     const purpose = document.getElementById('purpose');
+
+    modelPreset.addEventListener('change', () => {
+      const preset = presets.find(candidate => candidate.name === modelPreset.value);
+      if (!preset) {
+        return;
+      }
+      reviewerModel.value = preset.reviewerModelId;
+      examinerModel.value = preset.examinerModelId;
+      rebuttalModel.value = preset.rebuttalModelId;
+    });
+
+    [reviewerModel, examinerModel, rebuttalModel].forEach(select => {
+      select.addEventListener('change', () => {
+        const preset = presets.find(candidate =>
+          candidate.reviewerModelId === reviewerModel.value &&
+          candidate.examinerModelId === examinerModel.value &&
+          candidate.rebuttalModelId === rebuttalModel.value
+        );
+        modelPreset.value = preset?.name ?? '';
+      });
+    });
 
     document.getElementById('cancel').addEventListener('click', () => {
       vscode.postMessage({ command: 'cancel' });
@@ -795,7 +994,7 @@ function renderReviewFormHtml(input: {
       event.preventDefault();
       vscode.postMessage({
         command: 'submit',
-        reviewerModelId: document.getElementById('reviewer-model').value,
+        reviewerModelId: reviewerModel.value,
         examinerModelId: examinerModel.value,
         rebuttalModelId: rebuttalModel.value,
         purpose: purpose.value,
@@ -804,6 +1003,17 @@ function renderReviewFormHtml(input: {
   </script>
 </body>
 </html>`
+}
+
+function renderPresetOptions(presets: SerializedPreset[], selectedName: string): string {
+  const emptyOption = `<option value=""${selectedName ? '' : ' selected'}></option>`
+  const presetOptions = presets
+    .map(preset => {
+      const selected = preset.name === selectedName ? ' selected' : ''
+      return `<option value="${escapeAttribute(preset.name)}"${selected}>${escapeHtml(preset.label)}</option>`
+    })
+    .join('')
+  return emptyOption + presetOptions
 }
 
 function renderModelOptions(models: SerializedModel[], selectedId: string): string {
@@ -835,6 +1045,13 @@ function escapeHtml(value: string): string {
 
 function escapeAttribute(value: string): string {
   return escapeHtml(value)
+}
+
+function jsonForInlineScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029')
 }
 
 function modelFamilyDescription(model: vscode.LanguageModelChat): string {

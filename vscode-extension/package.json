@@ -2,7 +2,7 @@
   "name": "argos-vscode-extension",
   "displayName": "ARGOS Auto Review",
   "description": "Run ARGOS auto review with VS Code Copilot language models.",
-  "version": "0.1.9",
+  "version": "0.2.2",
   "private": true,
   "publisher": "argos",
   "repository": {
@@ -37,6 +37,77 @@
           "default": 220000,
           "minimum": 0,
           "description": "Maximum number of characters of additional code context sent to each model request."
+        },
+        "argos.activePreset": {
+          "type": "string",
+          "default": "",
+          "description": "Name of the ARGOS model preset to use as the default reviewer, examiner, and rebuttal selection."
+        },
+        "argos.presets": {
+          "type": "object",
+          "default": {},
+          "description": "Named ARGOS model presets. Model values must be the user-visible model labels shown by VS Code, such as 'Claude Opus 4.7' or 'GPT-5.4'.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string",
+                "description": "Display name for the preset."
+              },
+              "description": {
+                "type": "string",
+                "description": "Human-readable description for the preset."
+              },
+              "reviewer": {
+                "type": "object",
+                "description": "Reviewer model selection.",
+                "required": [
+                  "model"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "User-visible model label, such as 'Claude Opus 4.7'."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "examiner": {
+                "type": "object",
+                "description": "Examiner model selection.",
+                "required": [
+                  "model"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "User-visible model label, such as 'GPT-5.4'."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "rebuttal": {
+                "type": "object",
+                "description": "Rebuttal model selection.",
+                "required": [
+                  "model"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "User-visible model label, such as 'GPT-5.4'."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "reviewer",
+              "examiner",
+              "rebuttal"
+            ],
+            "additionalProperties": false
+          }
         }
       }
     }

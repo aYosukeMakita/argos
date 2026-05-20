@@ -5,6 +5,14 @@
   "version": "0.2.3",
   "private": true,
   "publisher": "argos",
+  "files": [
+    "dist/**",
+    "assets/**",
+    "package.json",
+    "package.nls.json",
+    "package.nls.ja.json",
+    "README.md"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/aYosukeMakita/argos.git",

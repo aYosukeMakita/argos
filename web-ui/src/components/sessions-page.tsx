@@ -11,11 +11,11 @@ import { usePollingResource } from '@/components/use-polling-resource'
 
 function actorLabel(actor: SessionRecord['next_actor']): string {
   if (actor === 'EXAMINER') {
-    return 'Examiner'
+    return '評価者'
   }
 
   if (actor === 'REVIEWER') {
-    return 'Reviewer'
+    return 'レビュワー（初回）'
   }
 
   return actor ?? '-'
@@ -23,7 +23,7 @@ function actorLabel(actor: SessionRecord['next_actor']): string {
 
 function nextActorLabel(actor: SessionRecord['next_actor']): string {
   if (actor === 'REVIEWER') {
-    return 'REBUTTAL'
+    return 'レビュワー（2, 3回目）'
   }
 
   return actorLabel(actor)
@@ -73,7 +73,7 @@ export function SessionsPage({ reviewId }: { reviewId?: string }) {
               <strong>{session.review_id}</strong>
             </div>
             <div>
-              <span className="meta-label">Examiner</span>
+              <span className="meta-label">評価者</span>
               <strong>{examinerLabel(session)}</strong>
             </div>
             <div>

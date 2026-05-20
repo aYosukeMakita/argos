@@ -112,6 +112,9 @@ interface ReviewFormLabels {
   presetGroup: string
   models: string
   preset: string
+  reviewerModelLabel: string
+  examinerModelLabel: string
+  rebuttalModelLabel: string
   reviewRequirements: string
   reviewRequirementsPlaceholder: string
   cancel: string
@@ -727,6 +730,9 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
       presetGroup: 'プリセット',
       models: 'モデル',
       preset: 'Preset',
+      reviewerModelLabel: 'レビュワー（初回）',
+      examinerModelLabel: '評価者',
+      rebuttalModelLabel: 'レビュワー（2, 3回目）',
       reviewRequirements: 'レビュー観点',
       reviewRequirementsPlaceholder: 'Markdown でレビュー観点や追加要件を書けます',
       cancel: 'キャンセル',
@@ -743,6 +749,9 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
     presetGroup: 'Preset',
     models: 'Models',
     preset: 'Preset',
+    reviewerModelLabel: 'Reviewer',
+    examinerModelLabel: 'Examiner',
+    rebuttalModelLabel: 'Rebuttal',
     reviewRequirements: 'Review requirements',
     reviewRequirementsPlaceholder: 'Write review requirements or extra context in Markdown',
     cancel: 'Cancel',
@@ -930,15 +939,15 @@ function renderReviewFormHtml(input: {
       <fieldset>
         <legend>${escapeHtml(labels.models)}</legend>
         <div>
-          <label for="reviewer-model">Reviewer</label>
+          <label for="reviewer-model">${escapeHtml(labels.reviewerModelLabel)}</label>
           <select id="reviewer-model" required>${reviewerOptions}</select>
         </div>
         <div>
-          <label for="examiner-model">Examiner</label>
+          <label for="examiner-model">${escapeHtml(labels.examinerModelLabel)}</label>
           <select id="examiner-model" required>${examinerOptions}</select>
         </div>
         <div>
-          <label for="rebuttal-model">Rebuttal</label>
+          <label for="rebuttal-model">${escapeHtml(labels.rebuttalModelLabel)}</label>
           <select id="rebuttal-model" required>${rebuttalOptions}</select>
         </div>
       </fieldset>
@@ -1363,6 +1372,7 @@ reviewer / examiner / rebuttal の議論から、最終的にバグと判定さ�
 ## 出力
 
 必ず JSON だけを返してください。Markdown フェンスや説明文は付けないでください。
+Markdown 本文は日本語で書いてください。見出し、箇条書き、ラベルも日本語にしてください。
 
 {"content":"Markdown の結論本文"}
 
@@ -1370,11 +1380,11 @@ reviewer / examiner / rebuttal の議論から、最終的にバグと判定さ�
 
 確定バグがある場合:
 
-### H1
+### 指摘 1
 
 - 重大度: High | Medium | Low
 - 対象: path/to/file.ext:123
-- バグ:
+- 結論:
 - 根拠:
 - 影響:
 - 修正方針:
@@ -1600,37 +1610,37 @@ function toFileTimestamp(value: string): string {
 
 function renderReportMarkdown(report: Omit<ReviewReport, 'markdownUri'>): string {
   const lines = [
-    '# ARGOS Review',
+    '# ARGOS レビュー結果',
     '',
-    `- Final judgment: ${report.finalJudgment}`,
-    `- Completion reason: ${report.completionReason}`,
-    `- Review ID: ${report.reviewId}`,
-    `- Session ID: ${report.sessionId}`,
-    `- Created: ${report.createdAt}`,
-    `- Repository: ${report.repositoryRoot}`,
-    `- Diff range: ${report.diffRange}`,
-    `- Reviewer model: ${report.models.reviewer}`,
-    `- Examiner model: ${report.models.examiner}`,
-    `- Rebuttal model: ${report.models.rebuttal}`,
+    `- 最終判定: ${report.finalJudgment}`,
+    `- 終了理由: ${report.completionReason}`,
+    `- レビュー ID: ${report.reviewId}`,
+    `- セッション ID: ${report.sessionId}`,
+    `- 作成日時: ${report.createdAt}`,
+    `- リポジトリ: ${report.repositoryRoot}`,
+    `- 差分範囲: ${report.diffRange}`,
+    `- レビュワー（初回）モデル: ${report.models.reviewer}`,
+    `- 評価者モデル: ${report.models.examiner}`,
+    `- レビュワー（2, 3回目）モデル: ${report.models.rebuttal}`,
     '',
-    '## Review Requirements',
+    '## レビュー要件',
     '',
     report.purpose,
     '',
-    '## Conclusion',
+    '## 結論',
     '',
     report.conclusionMarkdown,
     '',
-    '## Discussion',
+    '## 議論',
     '',
   ]
 
   for (const message of report.messages) {
     const judgment = message.judgment ? ` (${message.judgment})` : ''
-    lines.push(`### Round ${message.round} - ${formatAgentLabel(message.agent)}${judgment}`)
+    lines.push(`### 第${message.round}ラウンド - ${formatAgentLabel(message.agent)}${judgment}`)
     lines.push('')
-    lines.push(`- Model: ${message.model_name ?? 'Unknown'}`)
-    lines.push(`- Created: ${message.created_at}`)
+    lines.push(`- モデル: ${message.model_name ?? '不明'}`)
+    lines.push(`- 作成日時: ${message.created_at}`)
     lines.push('')
     lines.push(message.content)
     lines.push('')
@@ -1866,38 +1876,38 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
   <main class="shell">
     <header class="header">
       <div class="title-row">
-        <h1>ARGOS Review</h1>
+        <h1>ARGOS レビュー結果</h1>
         <span class="badge ${judgmentClass}">${escapeHtml(report.finalJudgment)}</span>
       </div>
       <div class="meta-grid">
-        ${renderMetaItem('Completion', report.completionReason)}
-        ${renderMetaItem('Review ID', report.reviewId)}
-        ${renderMetaItem('Session ID', report.sessionId)}
-        ${renderMetaItem('Created', report.createdAt)}
-        ${renderMetaItem('Repository', report.repositoryRoot)}
-        ${renderMetaItem('Diff Range', report.diffRange)}
-        ${renderMetaItem('Reviewer Model', report.models.reviewer)}
-        ${renderMetaItem('Examiner Model', report.models.examiner)}
-        ${renderMetaItem('Rebuttal Model', report.models.rebuttal)}
+        ${renderMetaItem('終了理由', report.completionReason)}
+        ${renderMetaItem('レビュー ID', report.reviewId)}
+        ${renderMetaItem('セッション ID', report.sessionId)}
+        ${renderMetaItem('作成日時', report.createdAt)}
+        ${renderMetaItem('リポジトリ', report.repositoryRoot)}
+        ${renderMetaItem('差分範囲', report.diffRange)}
+        ${renderMetaItem('レビュワー（初回）モデル', report.models.reviewer)}
+        ${renderMetaItem('評価者モデル', report.models.examiner)}
+        ${renderMetaItem('レビュワー（2, 3回目）モデル', report.models.rebuttal)}
       </div>
       <div class="actions">
-        <button id="open-markdown" type="button">Open Markdown</button>
+        <button id="open-markdown" type="button">Markdown を開く</button>
         <span class="path">${escapeHtml(markdownPath)}</span>
       </div>
     </header>
 
     <section>
-      <h2>Review Requirements</h2>
+      <h2>レビュー要件</h2>
       <div class="purpose">${escapeHtml(report.purpose)}</div>
     </section>
 
     <section>
-      <h2>Conclusion</h2>
+      <h2>結論</h2>
       <div class="conclusion markdown">${renderMarkdownToHtml(report.conclusionMarkdown)}</div>
     </section>
 
     <section>
-      <h2>Discussion</h2>
+      <h2>議論</h2>
       <div class="message-list">${messageCards}</div>
     </section>
   </main>
@@ -1921,8 +1931,8 @@ function renderMessageCardHtml(message: DiscussionMessageRecord): string {
     : ''
   return `<article class="message-card">
     <div class="message-header">
-      <div class="message-title">Round ${message.round} - ${escapeHtml(formatAgentLabel(message.agent))}${judgment}</div>
-      <div class="model">${escapeHtml(message.model_name ?? 'Unknown')}</div>
+      <div class="message-title">第${message.round}ラウンド - ${escapeHtml(formatAgentLabel(message.agent))}${judgment}</div>
+      <div class="model">${escapeHtml(message.model_name ?? '不明')}</div>
     </div>
     <div class="message-body markdown">${renderMarkdownToHtml(message.content)}</div>
   </article>`
@@ -2035,12 +2045,12 @@ function renderInlineMarkdown(value: string): string {
 
 function formatAgentLabel(agent: MessageAgent): string {
   if (agent === 'REVIEWER') {
-    return 'Reviewer'
+    return 'レビュワー（初回）'
   }
   if (agent === 'EXAMINER') {
-    return 'Examiner'
+    return '評価者'
   }
-  return 'Rebuttal'
+  return 'レビュワー（2, 3回目）'
 }
 
 function throwIfCancelled(token: vscode.CancellationToken): void {

@@ -22,11 +22,11 @@ function judgmentTone(value: string | null): 'neutral' | 'success' | 'danger' {
 
 function actorLabel(actor: 'REVIEWER' | 'EXAMINER' | null): string {
   if (actor === 'EXAMINER') {
-    return 'Examiner'
+    return '評価者'
   }
 
   if (actor === 'REVIEWER') {
-    return 'Reviewer'
+    return 'レビュワー（初回）'
   }
 
   return actor ?? '-'
@@ -34,7 +34,7 @@ function actorLabel(actor: 'REVIEWER' | 'EXAMINER' | null): string {
 
 function nextActorLabel(actor: 'REVIEWER' | 'EXAMINER' | null): string {
   if (actor === 'REVIEWER') {
-    return 'REBUTTAL'
+    return 'レビュワー（2, 3回目）'
   }
 
   return actorLabel(actor)

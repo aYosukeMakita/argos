@@ -75,13 +75,19 @@ extension から渡される入力には、レビュー観点・要件、対象 
 
 ## 出力
 
-必ず JSON だけを返してください。Markdown フェンスや説明文は付けないでください。
+必ず ARGOS_JSON_START と ARGOS_JSON_END の間に JSON だけを 1 個入れて返してください。Markdown フェンスや説明文は付けないでください。
 
-{"judgment":"OK","content":"Markdown の吟味本文"}
+ARGOS_JSON_START
+{"judgment":"OK","content_lines":["Markdown の吟味本文 1 行目","Markdown の吟味本文 2 行目"]}
+ARGOS_JSON_END
 
 または
 
-{"judgment":"NG","content":"Markdown の吟味本文"}
+ARGOS_JSON_START
+{"judgment":"NG","content_lines":["Markdown の吟味本文 1 行目","Markdown の吟味本文 2 行目"]}
+ARGOS_JSON_END
+
+互換形式として content 文字列でもよいですが、content_lines を優先してください。
 
 ## Markdown 形式
 

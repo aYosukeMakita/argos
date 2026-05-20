@@ -68,6 +68,11 @@ interface ConclusionOutput {
   content: string
 }
 
+interface JsonParseContext {
+  label: string
+  output: vscode.OutputChannel
+}
+
 interface RunInput {
   purpose: string
   repositoryRoot: string
@@ -315,7 +320,10 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         output,
         'Reviewer',
       )
-      const reviewer = parseJsonObject<ReviewerOutput>(reviewerRaw, validateReviewerOutput)
+      const reviewer = parseJsonObject<ReviewerOutput>(reviewerRaw, validateReviewerOutput, {
+        label: 'Reviewer',
+        output,
+      })
       throwIfCancelled(token)
       messages.push({
         id: messages.length + 1,
@@ -353,7 +361,10 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
             output,
             `Round ${nextAction.round} Examiner`,
           )
-          const examiner = parseJsonObject<ExaminerOutput>(examinerRaw, validateExaminerOutput)
+          const examiner = parseJsonObject<ExaminerOutput>(examinerRaw, validateExaminerOutput, {
+            label: `Round ${nextAction.round} Examiner`,
+            output,
+          })
           messages.push({
             id: messages.length + 1,
             session_id: sessionId,
@@ -380,7 +391,10 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
           output,
           `Round ${nextAction.round} Rebuttal`,
         )
-        const rebuttal = parseJsonObject<RebuttalOutput>(rebuttalRaw, validateRebuttalOutput)
+        const rebuttal = parseJsonObject<RebuttalOutput>(rebuttalRaw, validateRebuttalOutput, {
+          label: `Round ${nextAction.round} Rebuttal`,
+          output,
+        })
         messages.push({
           id: messages.length + 1,
           session_id: sessionId,
@@ -414,7 +428,10 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         output,
         'Conclusion',
       )
-      const conclusion = parseJsonObject<ConclusionOutput>(conclusionRaw, validateConclusionOutput)
+      const conclusion = parseJsonObject<ConclusionOutput>(conclusionRaw, validateConclusionOutput, {
+        label: 'Conclusion',
+        output,
+      })
       throwIfCancelled(token)
 
       const reportDraft: Omit<ReviewReport, 'markdownUri'> = {
@@ -1371,10 +1388,14 @@ reviewer / examiner / rebuttal の議論から、最終的にバグと判定さ�
 
 ## 出力
 
-必ず JSON だけを返してください。Markdown フェンスや説明文は付けないでください。
+必ず ARGOS_JSON_START と ARGOS_JSON_END の間に JSON だけを 1 個入れて返してください。Markdown フェンスや説明文は付けないでください。
 Markdown 本文は日本語で書いてください。見出し、箇条書き、ラベルも日本語にしてください。
 
-{"content":"Markdown の結論本文"}
+ARGOS_JSON_START
+{"content_lines":["Markdown の結論本文 1 行目","Markdown の結論本文 2 行目"]}
+ARGOS_JSON_END
+
+互換形式として {"content":"..."} でもよいですが、content_lines を優先してください。
 
 ## Markdown 形式
 
@@ -1490,6 +1511,12 @@ function stripJsonFence(text: string): string {
   return fence ? fence[1].trim() : trimmed
 }
 
+function extractArgosJson(text: string): string {
+  const trimmed = text.trim()
+  const block = trimmed.match(/ARGOS_JSON_START\s*([\s\S]*?)\s*ARGOS_JSON_END/i)
+  return block ? block[1].trim() : trimmed
+}
+
 /**
  * モデル応答の JSON 文字列内に含まれる不正なエスケープシーケンス（`\な` のように
  * `\` の後に JSON 仕様上有効でない文字が続くケース）を `\\` に変換して
@@ -1500,19 +1527,82 @@ function sanitizeJsonEscapes(text: string): string {
   return text.replace(/\\(?!["\\/bfnrtu])/g, '\\\\')
 }
 
-function parseJsonObject<T>(text: string, validate: (value: unknown) => T): T {
-  const stripped = stripJsonFence(text)
+function parseJsonObject<T>(text: string, validate: (value: unknown) => T, context: JsonParseContext): T {
+  const extracted = extractArgosJson(text)
+  const stripped = stripJsonFence(extracted)
   const sanitized = sanitizeJsonEscapes(stripped)
   try {
     return validate(JSON.parse(sanitized))
-  } catch {
+  } catch (error) {
+    logJsonParseFailure(context, sanitized, error)
     const start = sanitized.indexOf('{')
     const end = sanitized.lastIndexOf('}')
     if (start >= 0 && end > start) {
-      return validate(JSON.parse(sanitized.slice(start, end + 1)))
+      const candidate = sanitized.slice(start, end + 1)
+      try {
+        return validate(JSON.parse(candidate))
+      } catch (nestedError) {
+        logJsonParseFailure(context, candidate, nestedError, 'brace-slice')
+      }
     }
     throw new Error(`モデル応答が JSON として解釈できませんでした: ${stripped.slice(0, 300)}`)
   }
+}
+
+function logJsonParseFailure(
+  context: JsonParseContext,
+  payload: string,
+  error: unknown,
+  attempt: 'full' | 'brace-slice' = 'full',
+): void {
+  const message = formatError(error)
+  const position = extractJsonErrorPosition(message)
+  if (position === null) {
+    logArtifact(context.output, `${context.label} JSON parse failed (${attempt}): ${message}`)
+    return
+  }
+
+  const snippet = buildJsonErrorSnippet(payload, position)
+  logArtifact(context.output, `${context.label} JSON parse failed (${attempt}) at ${position}: ${message}`)
+  logArtifact(context.output, `${context.label} JSON parse snippet (${attempt}): ${snippet}`)
+}
+
+function extractJsonErrorPosition(message: string): number | null {
+  const match = message.match(/position\s+(\d+)/i)
+  if (!match) {
+    return null
+  }
+
+  const position = Number.parseInt(match[1], 10)
+  return Number.isFinite(position) ? position : null
+}
+
+function buildJsonErrorSnippet(payload: string, position: number): string {
+  const radius = 80
+  const start = Math.max(0, position - radius)
+  const end = Math.min(payload.length, position + radius)
+  const prefix = start > 0 ? '...' : ''
+  const suffix = end < payload.length ? '...' : ''
+  const snippet = payload.slice(start, end)
+  return `${prefix}${snippet}${suffix}`.replace(/\r/g, '\\r').replace(/\n/g, '\\n')
+}
+
+function coerceMarkdownContent(record: Record<string, unknown>, key: string): string {
+  const direct = record[key]
+  if (typeof direct === 'string' && direct.trim()) {
+    return direct.trim()
+  }
+
+  const linesKey = `${key}_lines`
+  const lines = record[linesKey]
+  if (Array.isArray(lines) && lines.every(line => typeof line === 'string')) {
+    const joined = lines.join('\n').trim()
+    if (joined) {
+      return joined
+    }
+  }
+
+  throw new Error(`${key} must be a non-empty string or ${linesKey} must be a non-empty string array`)
 }
 
 function validateReviewerOutput(value: unknown): ReviewerOutput {
@@ -1520,10 +1610,10 @@ function validateReviewerOutput(value: unknown): ReviewerOutput {
     throw new Error('reviewer response must be an object')
   }
   const record = value as Record<string, unknown>
-  if (typeof record.has_findings !== 'boolean' || typeof record.content !== 'string' || !record.content.trim()) {
-    throw new Error('reviewer response must include has_findings and content')
+  if (typeof record.has_findings !== 'boolean') {
+    throw new Error('reviewer response must include has_findings')
   }
-  return { has_findings: record.has_findings, content: record.content.trim() }
+  return { has_findings: record.has_findings, content: coerceMarkdownContent(record, 'content') }
 }
 
 function validateExaminerOutput(value: unknown): ExaminerOutput {
@@ -1531,10 +1621,10 @@ function validateExaminerOutput(value: unknown): ExaminerOutput {
     throw new Error('examiner response must be an object')
   }
   const record = value as Record<string, unknown>
-  if ((record.judgment !== 'OK' && record.judgment !== 'NG') || typeof record.content !== 'string') {
-    throw new Error('examiner response must include judgment OK/NG and content')
+  if (record.judgment !== 'OK' && record.judgment !== 'NG') {
+    throw new Error('examiner response must include judgment OK/NG')
   }
-  return { judgment: record.judgment, content: record.content.trim() }
+  return { judgment: record.judgment, content: coerceMarkdownContent(record, 'content') }
 }
 
 function validateRebuttalOutput(value: unknown): RebuttalOutput {
@@ -1542,10 +1632,7 @@ function validateRebuttalOutput(value: unknown): RebuttalOutput {
     throw new Error('rebuttal response must be an object')
   }
   const record = value as Record<string, unknown>
-  if (typeof record.content !== 'string' || !record.content.trim()) {
-    throw new Error('rebuttal response must include content')
-  }
-  return { content: record.content.trim() }
+  return { content: coerceMarkdownContent(record, 'content') }
 }
 
 function validateConclusionOutput(value: unknown): ConclusionOutput {
@@ -1553,10 +1640,7 @@ function validateConclusionOutput(value: unknown): ConclusionOutput {
     throw new Error('conclusion response must be an object')
   }
   const record = value as Record<string, unknown>
-  if (typeof record.content !== 'string' || !record.content.trim()) {
-    throw new Error('conclusion response must include content')
-  }
-  return { content: record.content.trim() }
+  return { content: coerceMarkdownContent(record, 'content') }
 }
 
 function createLocalId(prefix: string): string {

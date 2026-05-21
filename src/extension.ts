@@ -1517,14 +1517,67 @@ function extractArgosJson(text: string): string {
   return block ? block[1].trim() : trimmed
 }
 
-/**
- * モデル応答の JSON 文字列内に含まれる不正なエスケープシーケンス（`\な` のように
- * `\` の後に JSON 仕様上有効でない文字が続くケース）を `\\` に変換して
- * JSON.parse が通る状態に正規化する。
- * 有効な JSON エスケープ: \" \\ \/ \b \f \n \r \t \uXXXX
- */
 function sanitizeJsonEscapes(text: string): string {
-  return text.replace(/\\(?!["\\/bfnrtu])/g, '\\\\')
+  let sanitized = ''
+  let inString = false
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+
+    if (!inString) {
+      sanitized += char
+      if (char === '"') {
+        inString = true
+      }
+      continue
+    }
+
+    if (char === '"') {
+      sanitized += char
+      inString = false
+      continue
+    }
+
+    if (char !== '\\') {
+      sanitized += char
+      continue
+    }
+
+    const next = text[index + 1]
+    if (next && isSimpleJsonEscape(next)) {
+      sanitized += char + next
+      index += 1
+      continue
+    }
+
+    if (next === 'u' && isJsonUnicodeEscape(text, index)) {
+      sanitized += text.slice(index, index + 6)
+      index += 5
+      continue
+    }
+
+    sanitized += '\\\\'
+  }
+
+  return sanitized
+}
+
+function isSimpleJsonEscape(value: string): boolean {
+  return (
+    value === '"' ||
+    value === '\\' ||
+    value === '/' ||
+    value === 'b' ||
+    value === 'f' ||
+    value === 'n' ||
+    value === 'r' ||
+    value === 't'
+  )
+}
+
+function isJsonUnicodeEscape(text: string, start: number): boolean {
+  const digits = text.slice(start + 2, start + 6)
+  return digits.length === 4 && /^[0-9a-fA-F]{4}$/.test(digits)
 }
 
 function parseJsonObject<T>(text: string, validate: (value: unknown) => T, context: JsonParseContext): T {

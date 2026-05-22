@@ -78,6 +78,7 @@ interface RunInput {
   repositoryRoot: string
   diffPatch: string
   codeContext?: string
+  attachments: ReviewAttachment[]
   reviewId?: string
   sessionId?: string
 }
@@ -90,7 +91,18 @@ interface SelectedModels {
 
 interface ReviewFormResult {
   purpose: string
+  attachments: ReviewAttachment[]
   models: SelectedModels
+}
+
+type ReviewAttachmentKind = 'image' | 'text'
+
+interface ReviewAttachment {
+  id: string
+  kind: ReviewAttachmentKind
+  name: string
+  mimeType: string
+  content: string | Uint8Array
 }
 
 interface SerializedModel {
@@ -122,6 +134,17 @@ interface ReviewFormLabels {
   rebuttalModelLabel: string
   reviewRequirements: string
   reviewRequirementsPlaceholder: string
+  attachmentDropLabel: string
+  attachmentDropHint: string
+  attachmentCountHint: string
+  attachmentEmpty: string
+  attachmentUnsupported: string
+  attachmentImageLimit: string
+  attachmentTotalLimit: string
+  attachmentImageModelError: string
+  attachmentRemove: string
+  attachmentPastedImageName: string
+  attachmentButton: string
   cancel: string
   startReview: string
   emptyPurpose: string
@@ -132,6 +155,7 @@ interface ReviewReport {
   sessionId: string
   createdAt: string
   purpose: string
+  attachments: Array<Pick<ReviewAttachment, 'kind' | 'name' | 'mimeType'>>
   repositoryRoot: string
   diffRange: string
   markdownUri: vscode.Uri
@@ -149,6 +173,8 @@ interface ReviewReport {
 const execFileAsync = promisify(execFile)
 const textDecoder = new TextDecoder('utf8')
 const textEncoder = new TextEncoder()
+const maxImageAttachments = 5
+const maxTotalAttachments = 10
 
 const metadataFiles = [
   'package.json',
@@ -269,7 +295,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
   if (!reviewForm) {
     return
   }
-  const { models, purpose } = reviewForm
+  const { models, purpose, attachments } = reviewForm
 
   const reviewerPrompt = await readPromptAsset(context, 'reviewer.md')
   const examinerPrompt = await readPromptAsset(context, 'examiner.md')
@@ -297,12 +323,14 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       logStep(output, `Diff range: ${collected.diffRange}`)
       logStep(output, `Diff: ${collected.diffPatch.length} chars`)
       logStep(output, `Context: ${collected.codeContext?.length ?? 0} chars`)
+      logStep(output, `Attachments: ${attachments.length}`)
 
       const input: RunInput = {
         purpose,
         repositoryRoot: collected.repositoryRoot,
         diffPatch: collected.diffPatch,
         codeContext: collected.codeContext,
+        attachments,
       }
       const reviewId = createLocalId('review')
       const sessionId = createLocalId('session')
@@ -316,6 +344,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       const reviewerRaw = await callLanguageModel(
         models.reviewer,
         buildPrompt(reviewerPrompt, reviewerUserInput(input)),
+        input,
         token,
         output,
         'Reviewer',
@@ -357,6 +386,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
           const examinerRaw = await callLanguageModel(
             models.examiner,
             buildPrompt(examinerPrompt, examinerUserInput(input, messages)),
+            input,
             token,
             output,
             `Round ${nextAction.round} Examiner`,
@@ -387,6 +417,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         const rebuttalRaw = await callLanguageModel(
           models.rebuttal,
           buildPrompt(rebuttalPrompt, rebuttalUserInput(input, messages)),
+          input,
           token,
           output,
           `Round ${nextAction.round} Rebuttal`,
@@ -424,6 +455,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       const conclusionRaw = await callLanguageModel(
         models.examiner,
         buildPrompt(conclusionSystemPrompt(), conclusionUserInput(input, messages, nextAction.final_judgment)),
+        input,
         token,
         output,
         'Conclusion',
@@ -439,6 +471,11 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         sessionId,
         createdAt,
         purpose,
+        attachments: attachments.map(attachment => ({
+          kind: attachment.kind,
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+        })),
         repositoryRoot: collected.repositoryRoot,
         diffRange: collected.diffRange,
         conclusionMarkdown: conclusion.content,
@@ -548,7 +585,7 @@ async function showReviewForm(
       }
     })
 
-    panel.webview.onDidReceiveMessage(message => {
+    panel.webview.onDidReceiveMessage(async message => {
       if (!message || typeof message !== 'object') {
         return
       }
@@ -569,7 +606,14 @@ async function showReviewForm(
         const rebuttal = getModelById(modelById, record.rebuttalModelId)
         const purpose =
           typeof record.purpose === 'string' && record.purpose.trim() ? record.purpose.trim() : labels.emptyPurpose
-        finish({ purpose, models: { reviewer, examiner, rebuttal } })
+        const attachments = deserializeAttachments(record.attachments, labels)
+        if (
+          attachments.some(attachment => attachment.kind === 'image') &&
+          [reviewer, examiner, rebuttal].some(model => !supportsImageInput(model))
+        ) {
+          throw new Error(labels.attachmentImageModelError)
+        }
+        finish({ purpose, attachments, models: { reviewer, examiner, rebuttal } })
       } catch (error) {
         reject(error)
       }
@@ -752,6 +796,17 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
       rebuttalModelLabel: 'レビュワー（2, 3回目）',
       reviewRequirements: 'レビュー観点',
       reviewRequirementsPlaceholder: 'Markdown でレビュー観点や追加要件を書けます',
+      attachmentDropLabel: '添付資料',
+      attachmentDropHint: 'ファイル添付ボタンで資料を追加できます。画像は貼り付けでも追加できます。',
+      attachmentCountHint: `画像は最大 ${maxImageAttachments} 枚、添付全体は最大 ${maxTotalAttachments} 件です`,
+      attachmentEmpty: '添付はありません',
+      attachmentUnsupported: '画像とテキストファイルのみ添付できます',
+      attachmentImageLimit: `画像は最大 ${maxImageAttachments} 枚までです`,
+      attachmentTotalLimit: `添付は最大 ${maxTotalAttachments} 件までです`,
+      attachmentImageModelError: '画像添付を使うには、選択した全モデルが画像入力に対応している必要があります',
+      attachmentRemove: '削除',
+      attachmentPastedImageName: '貼り付け画像',
+      attachmentButton: 'ファイル添付',
       cancel: 'キャンセル',
       startReview: 'レビュー開始',
       emptyPurpose: '追加要件なし',
@@ -771,6 +826,17 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
     rebuttalModelLabel: 'Rebuttal',
     reviewRequirements: 'Review requirements',
     reviewRequirementsPlaceholder: 'Write review requirements or extra context in Markdown',
+    attachmentDropLabel: 'Attachments',
+    attachmentDropHint: 'Use the attach button to add files. Images can also be pasted from the clipboard.',
+    attachmentCountHint: `Up to ${maxImageAttachments} images and ${maxTotalAttachments} files total`,
+    attachmentEmpty: 'No attachments',
+    attachmentUnsupported: 'Only images and text files can be attached',
+    attachmentImageLimit: `You can attach up to ${maxImageAttachments} images`,
+    attachmentTotalLimit: `You can attach up to ${maxTotalAttachments} files in total`,
+    attachmentImageModelError: 'Image attachments require all selected models to support image input',
+    attachmentRemove: 'Remove',
+    attachmentPastedImageName: 'Pasted Image',
+    attachmentButton: 'Attach Files',
     cancel: 'Cancel',
     startReview: 'Start Review',
     emptyPurpose: 'No additional requirements',
@@ -797,6 +863,17 @@ function renderReviewFormHtml(input: {
   const rebuttalOptions = renderModelOptions(input.examinerModels, input.defaultRebuttalId)
   const presetsJson = jsonForInlineScript(input.presets)
   const labels = input.labels
+  const attachmentLabelsJson = jsonForInlineScript({
+    empty: labels.attachmentEmpty,
+    unsupported: labels.attachmentUnsupported,
+    imageLimit: labels.attachmentImageLimit,
+    totalLimit: labels.attachmentTotalLimit,
+    remove: labels.attachmentRemove,
+    pastedImageName: labels.attachmentPastedImageName,
+  })
+  const acceptedAttachmentTypes = [...textExtensions, ...imageExtensions()].join(',')
+  const textExtensionsJson = jsonForInlineScript([...textExtensions])
+  const imageExtensionsJson = jsonForInlineScript(imageExtensions())
 
   return `<!DOCTYPE html>
 <html lang="${escapeAttribute(labels.htmlLang)}">
@@ -898,6 +975,78 @@ function renderReviewFormHtml(input: {
       font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
     }
 
+    .attachment-box {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--vscode-editorWidget-background) 82%, transparent);
+    }
+
+    .attachment-hint,
+    .attachment-count,
+    .attachment-status,
+    .attachment-empty,
+    .attachment-detail {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
+
+    .attachment-status.error {
+      color: var(--vscode-errorForeground);
+    }
+
+    .attachment-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .attachment-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 10px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editorWidget-background);
+    }
+
+    .attachment-meta {
+      min-width: 0;
+    }
+
+    .attachment-name {
+      overflow-wrap: anywhere;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .attachment-detail {
+      overflow-wrap: anywhere;
+    }
+
+    .attachment-remove {
+      min-width: auto;
+      padding: 4px 8px;
+    }
+
+    .attachment-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .visually-hidden-file-input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
     .actions {
       display: flex;
       justify-content: flex-end;
@@ -974,6 +1123,20 @@ function renderReviewFormHtml(input: {
         <textarea id="purpose" placeholder="${escapeAttribute(labels.reviewRequirementsPlaceholder)}"></textarea>
       </div>
 
+      <div>
+        <label for="attachment-dropzone">${escapeHtml(labels.attachmentDropLabel)}</label>
+        <div id="attachment-dropzone" class="attachment-box">
+          <div class="attachment-hint">${escapeHtml(labels.attachmentDropHint)}</div>
+          <div class="attachment-count">${escapeHtml(labels.attachmentCountHint)}</div>
+          <div class="attachment-controls">
+            <button id="attachment-file-button" type="button">${escapeHtml(labels.attachmentButton)}</button>
+            <input id="attachment-file-input" class="visually-hidden-file-input" type="file" multiple accept="${escapeAttribute(acceptedAttachmentTypes)}">
+          </div>
+          <div id="attachment-status" class="attachment-status" aria-live="polite"></div>
+          <div id="attachment-list" class="attachment-list"></div>
+        </div>
+      </div>
+
       <div class="actions">
         <button id="cancel" type="button">${escapeHtml(labels.cancel)}</button>
         <button type="submit">${escapeHtml(labels.startReview)}</button>
@@ -990,6 +1153,188 @@ function renderReviewFormHtml(input: {
     const examinerModel = document.getElementById('examiner-model');
     const rebuttalModel = document.getElementById('rebuttal-model');
     const purpose = document.getElementById('purpose');
+    const attachmentFileButton = document.getElementById('attachment-file-button');
+    const attachmentFileInput = document.getElementById('attachment-file-input');
+    const attachmentStatus = document.getElementById('attachment-status');
+    const attachmentList = document.getElementById('attachment-list');
+    const attachmentState = [];
+    const attachmentLabels = ${attachmentLabelsJson};
+    const supportedTextExtensions = new Set(${textExtensionsJson});
+    const supportedImageExtensions = new Set(${imageExtensionsJson});
+
+    function setAttachmentStatus(message, isError = false) {
+      attachmentStatus.textContent = message;
+      attachmentStatus.classList.toggle('error', Boolean(message) && isError);
+    }
+
+    function base64FromArrayBuffer(buffer) {
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      const chunkSize = 0x8000;
+      for (let index = 0; index < bytes.length; index += chunkSize) {
+        const chunk = bytes.subarray(index, index + chunkSize);
+        binary += String.fromCharCode(...chunk);
+      }
+      return btoa(binary);
+    }
+
+    function fileExtension(name) {
+      const dotIndex = name.lastIndexOf('.');
+      return dotIndex >= 0 ? name.slice(dotIndex).toLowerCase() : '';
+    }
+
+    function textMimeTypeForName(name) {
+      switch (fileExtension(name)) {
+        case '.json':
+          return 'application/json';
+        case '.md':
+          return 'text/markdown';
+        case '.yaml':
+        case '.yml':
+          return 'application/yaml';
+        default:
+          return 'text/plain';
+      }
+    }
+
+    function imageCount() {
+      return attachmentState.filter(attachment => attachment.kind === 'image').length;
+    }
+
+    function renderAttachmentList() {
+      attachmentList.textContent = '';
+      if (attachmentState.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'attachment-empty';
+        empty.textContent = attachmentLabels.empty;
+        attachmentList.appendChild(empty);
+        return;
+      }
+
+      for (const attachment of attachmentState) {
+        const item = document.createElement('div');
+        item.className = 'attachment-item';
+
+        const meta = document.createElement('div');
+        meta.className = 'attachment-meta';
+
+        const name = document.createElement('div');
+        name.className = 'attachment-name';
+        name.textContent = attachment.name;
+
+        const detail = document.createElement('div');
+        detail.className = 'attachment-detail';
+        detail.textContent = attachment.kind + ' / ' + attachment.mimeType;
+
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'attachment-remove';
+        removeButton.textContent = attachmentLabels.remove;
+        removeButton.addEventListener('click', event => {
+          event.stopPropagation();
+          const index = attachmentState.findIndex(candidate => candidate.id === attachment.id);
+          if (index >= 0) {
+            attachmentState.splice(index, 1);
+            renderAttachmentList();
+            setAttachmentStatus('');
+          }
+        });
+
+        meta.appendChild(name);
+        meta.appendChild(detail);
+        item.appendChild(meta);
+        item.appendChild(removeButton);
+        attachmentList.appendChild(item);
+      }
+    }
+
+    async function createImageAttachmentFromFile(file) {
+      return {
+        id: 'image:' + file.name + ':' + file.size + ':' + file.lastModified,
+        kind: 'image',
+        name: file.name,
+        mimeType: file.type || 'image/png',
+        base64Content: base64FromArrayBuffer(await file.arrayBuffer()),
+      };
+    }
+
+    async function createAttachmentFromFile(file) {
+      const extension = fileExtension(file.name);
+      if (file.type.startsWith('image/') || supportedImageExtensions.has(extension)) {
+        return createImageAttachmentFromFile(file);
+      }
+
+      if (!supportedTextExtensions.has(extension)) {
+        return undefined;
+      }
+
+      return {
+        id: 'text:' + file.name + ':' + file.size + ':' + file.lastModified,
+        kind: 'text',
+        name: file.name,
+        mimeType: file.type || textMimeTypeForName(file.name),
+        textContent: await file.text(),
+      };
+    }
+
+    function addAttachments(attachments) {
+      setAttachmentStatus('');
+      for (const attachment of attachments) {
+        if (!attachment) {
+          setAttachmentStatus(attachmentLabels.unsupported, true);
+          continue;
+        }
+
+        const exists = attachmentState.some(candidate => candidate.id === attachment.id);
+        const nextImageCount = imageCount() + (attachment.kind === 'image' && !exists ? 1 : 0);
+        const nextTotalCount = attachmentState.length + (exists ? 0 : 1);
+        if (nextImageCount > ${maxImageAttachments}) {
+          setAttachmentStatus(attachmentLabels.imageLimit, true);
+          continue;
+        }
+        if (nextTotalCount > ${maxTotalAttachments}) {
+          setAttachmentStatus(attachmentLabels.totalLimit, true);
+          continue;
+        }
+
+        if (exists) {
+          const index = attachmentState.findIndex(candidate => candidate.id === attachment.id);
+          attachmentState.splice(index, 1, attachment);
+        } else {
+          attachmentState.push(attachment);
+        }
+      }
+      renderAttachmentList();
+    }
+
+    attachmentFileButton.addEventListener('click', () => {
+      attachmentFileInput.click();
+    });
+
+    attachmentFileInput.addEventListener('change', async () => {
+      const files = Array.from(attachmentFileInput.files ?? []);
+      const attachments = [];
+      for (const file of files) {
+        attachments.push(await createAttachmentFromFile(file));
+      }
+      addAttachments(attachments);
+      attachmentFileInput.value = '';
+    });
+
+    document.addEventListener('paste', async event => {
+      const imageItem = Array.from(event.clipboardData?.items ?? []).find(item => item.type.startsWith('image/'));
+      const imageFile = imageItem?.getAsFile();
+      if (!imageFile) {
+        return;
+      }
+
+      event.preventDefault();
+      const fileName = attachmentLabels.pastedImageName + ' ' + Date.now() + '.png';
+      const attachment = await createImageAttachmentFromFile(new File([imageFile], fileName, { type: imageFile.type || 'image/png' }));
+      addAttachments([attachment]);
+    });
+
+    renderAttachmentList();
 
     modelPreset.addEventListener('change', () => {
       const preset = presets.find(candidate => candidate.name === modelPreset.value);
@@ -1024,6 +1369,7 @@ function renderReviewFormHtml(input: {
         examinerModelId: examinerModel.value,
         rebuttalModelId: rebuttalModel.value,
         purpose: purpose.value,
+        attachments: attachmentState,
       });
     });
   </script>
@@ -1049,6 +1395,63 @@ function renderModelOptions(models: SerializedModel[], selectedId: string): stri
       return `<option value="${escapeAttribute(model.id)}"${selected}>${escapeHtml(model.label)}</option>`
     })
     .join('')
+}
+
+function deserializeAttachments(value: unknown, labels: ReviewFormLabels): ReviewAttachment[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  const unique = new Map<string, ReviewAttachment>()
+  let imageCount = 0
+
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+
+    const record = item as Record<string, unknown>
+    const id = typeof record.id === 'string' ? record.id : ''
+    const kind = record.kind === 'image' || record.kind === 'text' ? record.kind : undefined
+    const name = typeof record.name === 'string' ? record.name.trim() : ''
+    const mimeType = typeof record.mimeType === 'string' && record.mimeType.trim() ? record.mimeType.trim() : ''
+    if (!id || !kind || !name || !mimeType) {
+      continue
+    }
+
+    let attachment: ReviewAttachment | undefined
+    if (kind === 'image') {
+      const base64Content = typeof record.base64Content === 'string' ? record.base64Content : ''
+      if (!base64Content) {
+        continue
+      }
+      attachment = { id, kind, name, mimeType, content: decodeBase64(base64Content) }
+    } else {
+      const textContent = typeof record.textContent === 'string' ? record.textContent : ''
+      attachment = { id, kind, name, mimeType, content: textContent }
+    }
+
+    if (!unique.has(id)) {
+      if (attachment.kind === 'image') {
+        imageCount += 1
+        if (imageCount > maxImageAttachments) {
+          throw new Error(labels.attachmentImageLimit)
+        }
+      }
+
+      if (unique.size + 1 > maxTotalAttachments) {
+        throw new Error(labels.attachmentTotalLimit)
+      }
+    }
+
+    unique.set(id, attachment)
+  }
+
+  return [...unique.values()]
+}
+
+function imageExtensions(): string[] {
+  return ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif']
 }
 
 function createNonce(): string {
@@ -1360,15 +1763,15 @@ function buildPrompt(systemPrompt: string, userPrompt: string): string {
 }
 
 function reviewerUserInput(input: RunInput): string {
-  return `${formatReviewRequirements(input)}\n\nリポジトリ:\n${input.repositoryRoot}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\nリポジトリ:\n${input.repositoryRoot}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
 function examinerUserInput(input: RunInput, messages: DiscussionMessageRecord[]): string {
-  return `${formatReviewRequirements(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
 function rebuttalUserInput(input: RunInput, messages: DiscussionMessageRecord[]): string {
-  return `${formatReviewRequirements(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
 function conclusionSystemPrompt(): string {
@@ -1427,7 +1830,7 @@ function conclusionUserInput(
   messages: DiscussionMessageRecord[],
   finalJudgment: FinalJudgment,
 ): string {
-  return `${formatReviewRequirements(input)}
+  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}
 
 対象 review_id:
 ${input.reviewId ?? 'unknown'}
@@ -1447,6 +1850,15 @@ ${input.purpose}
 ARGOS_REVIEW_REQUIREMENTS_MARKDOWN>>>`
 }
 
+function formatAttachmentSummary(input: RunInput): string {
+  if (input.attachments.length === 0) {
+    return ''
+  }
+
+  const lines = input.attachments.map(attachment => `- ${attachment.kind}: ${attachment.name} (${attachment.mimeType})`)
+  return `\n\n添付資料:\n${lines.join('\n')}`
+}
+
 function formatCodeContext(input: RunInput): string {
   return input.codeContext ? `\n\n関連コードコンテキスト:\n\n${input.codeContext}` : ''
 }
@@ -1463,12 +1875,14 @@ function formatMessages(messages: DiscussionMessageRecord[]): string {
 async function callLanguageModel(
   model: vscode.LanguageModelChat,
   prompt: string,
+  input: RunInput,
   token: vscode.CancellationToken,
   output: vscode.OutputChannel,
   label: string,
 ): Promise<string> {
   const startedAt = Date.now()
   logProgress(output, `${label}: Language Model API に送信します (${formatCount(prompt.length)} chars prompt)`)
+  const messageContent = buildMessageContent(model, prompt, input)
 
   let response: vscode.LanguageModelChatResponse
   const requestHeartbeat = setInterval(() => {
@@ -1477,7 +1891,7 @@ async function callLanguageModel(
 
   try {
     response = await model.sendRequest(
-      [vscode.LanguageModelChatMessage.User(prompt)],
+      [vscode.LanguageModelChatMessage.User(messageContent)],
       {
         justification: 'ARGOS 自動レビューで reviewer / examiner / rebuttal を実行するために利用します。',
       },
@@ -1512,6 +1926,54 @@ async function callLanguageModel(
 
   logProgress(output, `${label}: 応答受信完了 ${formatCount(text.length)} chars (${formatElapsed(startedAt)})`)
   return text
+}
+
+function buildMessageContent(
+  model: vscode.LanguageModelChat,
+  prompt: string,
+  input: RunInput,
+): Array<vscode.LanguageModelTextPart | vscode.LanguageModelDataPart> {
+  const parts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelDataPart> = [
+    new vscode.LanguageModelTextPart(prompt),
+  ]
+
+  const textAttachments = input.attachments.filter(
+    (attachment): attachment is ReviewAttachment & { content: string } => attachment.kind === 'text',
+  )
+  if (textAttachments.length > 0) {
+    const textBlock = textAttachments
+      .map(
+        attachment =>
+          `### ${attachment.name}\nMIME: ${attachment.mimeType}\n\n<<<ARGOS_ATTACHMENT_TEXT\n${attachment.content}\nARGOS_ATTACHMENT_TEXT>>>`,
+      )
+      .join('\n\n---\n\n')
+    parts.push(new vscode.LanguageModelTextPart(`添付テキスト資料の内容:\n\n${textBlock}`))
+  }
+
+  const imageAttachments = input.attachments.filter(
+    (attachment): attachment is ReviewAttachment & { content: Uint8Array } => attachment.kind === 'image',
+  )
+  if (imageAttachments.length > 0) {
+    if (!supportsImageInput(model)) {
+      throw new Error('画像添付を送信するには、選択したモデルが画像入力に対応している必要があります')
+    }
+
+    for (const attachment of imageAttachments) {
+      parts.push(new vscode.LanguageModelTextPart(`添付画像: ${attachment.name} (${attachment.mimeType})`))
+      parts.push(vscode.LanguageModelDataPart.image(attachment.content, attachment.mimeType))
+    }
+  }
+
+  return parts
+}
+
+function decodeBase64(value: string): Uint8Array {
+  return new Uint8Array(Buffer.from(value, 'base64'))
+}
+
+function supportsImageInput(model: vscode.LanguageModelChat): boolean {
+  const capabilities = (model as vscode.LanguageModelChat & { capabilities?: { imageInput?: boolean } }).capabilities
+  return capabilities?.imageInput !== false
 }
 
 function stripJsonFence(text: string): string {
@@ -1773,6 +2235,10 @@ function renderReportMarkdown(report: Omit<ReviewReport, 'markdownUri'>): string
     '',
     report.purpose,
     '',
+    '## 添付資料',
+    '',
+    ...formatReportAttachments(report.attachments),
+    '',
     '## 結論',
     '',
     report.conclusionMarkdown,
@@ -1793,6 +2259,14 @@ function renderReportMarkdown(report: Omit<ReviewReport, 'markdownUri'>): string
   }
 
   return `${lines.join('\n').trim()}\n`
+}
+
+function formatReportAttachments(attachments: Array<Pick<ReviewAttachment, 'kind' | 'name' | 'mimeType'>>): string[] {
+  if (attachments.length === 0) {
+    return ['添付資料はありません。']
+  }
+
+  return attachments.map(attachment => `- ${attachment.kind}: ${attachment.name} (${attachment.mimeType})`)
 }
 
 async function openReviewPreview(context: vscode.ExtensionContext, report: ReviewReport): Promise<void> {
@@ -1826,6 +2300,7 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
   const report = input.report
   const judgmentClass = report.finalJudgment === 'OK' ? 'ok' : 'ng'
   const messageCards = report.messages.map(renderMessageCardHtml).join('')
+  const attachmentItems = renderPreviewAttachments(report.attachments)
   const markdownPath = vscode.workspace.asRelativePath(report.markdownUri, false)
 
   return `<!DOCTYPE html>
@@ -1938,6 +2413,7 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
       overflow-wrap: anywhere;
     }
     .purpose,
+    .attachments,
     .conclusion,
     .message-card {
       border: 1px solid var(--vscode-panel-border);
@@ -1945,11 +2421,20 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
       background: var(--vscode-editorWidget-background);
     }
     .purpose,
+    .attachments,
     .conclusion {
       padding: 14px 16px;
     }
     .purpose {
       white-space: pre-wrap;
+    }
+    .attachments ul {
+      margin: 0 0 0 20px;
+      padding: 0;
+    }
+    .attachments li {
+      margin: 3px 0;
+      overflow-wrap: anywhere;
     }
     .message-list {
       display: grid;
@@ -2048,6 +2533,11 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
     </section>
 
     <section>
+      <h2>添付資料</h2>
+      <div class="attachments">${attachmentItems}</div>
+    </section>
+
+    <section>
       <h2>結論</h2>
       <div class="conclusion markdown">${renderMarkdownToHtml(report.conclusionMarkdown)}</div>
     </section>
@@ -2069,6 +2559,20 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
 
 function renderMetaItem(label: string, value: string): string {
   return `<div class="meta-item"><span class="meta-label">${escapeHtml(label)}</span><div class="meta-value">${escapeHtml(value)}</div></div>`
+}
+
+function renderPreviewAttachments(attachments: Array<Pick<ReviewAttachment, 'kind' | 'name' | 'mimeType'>>): string {
+  if (attachments.length === 0) {
+    return '添付資料はありません。'
+  }
+
+  const items = attachments
+    .map(
+      attachment =>
+        `<li>${escapeHtml(attachment.kind)}: ${escapeHtml(attachment.name)} (${escapeHtml(attachment.mimeType)})</li>`,
+    )
+    .join('')
+  return `<ul>${items}</ul>`
 }
 
 function renderMessageCardHtml(message: DiscussionMessageRecord): string {

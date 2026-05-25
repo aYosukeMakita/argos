@@ -13,6 +13,7 @@ type CompletionReason = 'approved' | 'max_rounds_reached'
 interface ExtensionSettings {
   includeContext: boolean
   contextBudget: number
+  generatePromptFile: boolean
   activePreset: string
   presets: Record<string, ModelPreset>
 }
@@ -159,6 +160,7 @@ interface ReviewReport {
   repositoryRoot: string
   diffRange: string
   markdownUri: vscode.Uri
+  promptUri?: vscode.Uri
   conclusionMarkdown: string
   finalJudgment: FinalJudgment
   completionReason: CompletionReason
@@ -489,11 +491,17 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         messages,
       }
       const markdownUri = await writeMarkdownReport(workspaceFolder.uri.fsPath, reportDraft)
-      const report: ReviewReport = { ...reportDraft, markdownUri }
+      const promptUri = settings.generatePromptFile
+        ? await writePromptFile(workspaceFolder.uri.fsPath, reportDraft, reviewerPrompt, input)
+        : undefined
+      const report: ReviewReport = { ...reportDraft, markdownUri, promptUri }
       const finalJudgment = report.finalJudgment
       logArtifact(output, `Final judgment: ${finalJudgment}`)
       logArtifact(output, `Completion reason: ${report.completionReason}`)
       logArtifact(output, `Markdown report: ${report.markdownUri.fsPath}`)
+      if (report.promptUri) {
+        logArtifact(output, `Prompt file: ${report.promptUri.fsPath}`)
+      }
       await openReviewPreview(context, report)
     },
   )
@@ -523,6 +531,7 @@ function readSettings(): ExtensionSettings {
   return {
     includeContext: config.get('includeContext', true),
     contextBudget: config.get('contextBudget', 220_000),
+    generatePromptFile: config.get('generatePromptFile', true),
     activePreset: config.get('activePreset', '').trim(),
     presets: normalizeModelPresets(config.get('presets', {})),
   }
@@ -2212,6 +2221,19 @@ async function writeMarkdownReport(
   return reportUri
 }
 
+async function writePromptFile(
+  workspaceRoot: string,
+  report: Omit<ReviewReport, 'markdownUri' | 'promptUri'>,
+  reviewerPrompt: string,
+  input: RunInput,
+): Promise<vscode.Uri> {
+  const directoryUri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), '.github', 'prompts')
+  await vscode.workspace.fs.createDirectory(directoryUri)
+  const promptUri = vscode.Uri.joinPath(directoryUri, `argos-${report.sessionId}.prompt.md`)
+  await vscode.workspace.fs.writeFile(promptUri, textEncoder.encode(renderPromptFile(report, reviewerPrompt, input)))
+  return promptUri
+}
+
 function toFileTimestamp(value: string): string {
   return value.replace(/[:.]/g, '-').replace(/Z$/, 'Z')
 }
@@ -2261,6 +2283,91 @@ function renderReportMarkdown(report: Omit<ReviewReport, 'markdownUri'>): string
   return `${lines.join('\n').trim()}\n`
 }
 
+function renderPromptFile(
+  report: Omit<ReviewReport, 'markdownUri' | 'promptUri'>,
+  reviewerPrompt: string,
+  input: RunInput,
+): string {
+  const lines = [
+    '---',
+    `name: ${yamlDoubleQuoted(`ARGOS ${report.sessionId}`)}`,
+    `description: ${yamlDoubleQuoted(`ARGOS review Q&A and fix support for ${report.sessionId}`)}`,
+    'agent: "agent"',
+    '---',
+    '',
+    'あなたは ARGOS のレビュー後 Q&A と修正作業を支援します。以下の reviewer システムプロンプト、レビュー対象入力、レビュー結果、議論を前提に、ユーザーの質問へ日本語で対応してください。',
+    '',
+    '主な用途:',
+    '- 不具合の再現方法を、差分と指摘根拠に基づいて具体化する',
+    '- 不具合の修正方法を、既存コードの意図を保ちながら提案する',
+    '- レビュー指摘の妥当性、前提条件、影響範囲を確認する',
+    '',
+    '制約:',
+    '- コンテキストに根拠がない場合は、推測であることを明示する',
+    '- ユーザーが説明、再現方法、修正方針を求めた場合は、コード編集せず回答する',
+    '- ユーザーが修正の実装を明示的に求めた場合だけ、既存コードを確認して最小差分で修正する',
+    '- 修正方法を提案する場合は、対象ファイルと該当箇所をできるだけ具体的に示す',
+    '- 新しいレビュー指摘を作るより、ユーザーの質問対象になっている指摘の説明と解決を優先する',
+    '',
+    '## Reviewer システムプロンプト',
+    '',
+    '<<<ARGOS_REVIEWER_SYSTEM_PROMPT',
+    reviewerPrompt.trim(),
+    'ARGOS_REVIEWER_SYSTEM_PROMPT>>>',
+    '',
+    '## レビュー対象入力',
+    '',
+    formatReviewRequirements(input),
+    formatAttachmentContextForPrompt(input),
+    '',
+    'リポジトリ:',
+    input.repositoryRoot,
+    '',
+    '差分:',
+    '',
+    '<<<ARGOS_DIFF_PATCH',
+    input.diffPatch,
+    'ARGOS_DIFF_PATCH>>>',
+    formatCodeContextForPrompt(input),
+    '',
+    '## ARGOS レビュー結果',
+    '',
+    renderReportMarkdown(report),
+  ]
+
+  return `${lines.join('\n').trim()}\n`
+}
+
+function formatAttachmentContextForPrompt(input: RunInput): string {
+  if (input.attachments.length === 0) {
+    return ''
+  }
+
+  const lines = ['添付資料:', ...input.attachments.map(formatAttachmentForPrompt)]
+  return `\n\n${lines.join('\n')}`
+}
+
+function formatAttachmentForPrompt(attachment: ReviewAttachment): string {
+  const heading = `- ${attachment.kind}: ${attachment.name} (${attachment.mimeType})`
+  if (attachment.kind === 'image') {
+    return `${heading}\n  - 画像本体は .prompt.md に埋め込まれていません。必要なら元のレビュー時の添付画像を参照してください。`
+  }
+
+  return `${heading}\n\n<<<ARGOS_ATTACHMENT_TEXT\n${attachment.content}\nARGOS_ATTACHMENT_TEXT>>>`
+}
+
+function formatCodeContextForPrompt(input: RunInput): string {
+  if (!input.codeContext) {
+    return ''
+  }
+
+  return `\n\n関連コードコンテキスト:\n\n<<<ARGOS_CODE_CONTEXT\n${input.codeContext}\nARGOS_CODE_CONTEXT>>>`
+}
+
+function yamlDoubleQuoted(value: string): string {
+  return JSON.stringify(value)
+}
+
 function formatReportAttachments(attachments: Array<Pick<ReviewAttachment, 'kind' | 'name' | 'mimeType'>>): string[] {
   if (attachments.length === 0) {
     return ['添付資料はありません。']
@@ -2291,6 +2398,8 @@ async function openReviewPreview(context: vscode.ExtensionContext, report: Revie
     const record = message as Record<string, unknown>
     if (record.command === 'openMarkdown') {
       await vscode.window.showTextDocument(report.markdownUri, { preview: false })
+    } else if (record.command === 'openPromptFile' && report.promptUri) {
+      await vscode.window.showTextDocument(report.promptUri, { preview: false })
     }
   })
   context.subscriptions.push(disposable)
@@ -2302,6 +2411,7 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
   const messageCards = report.messages.map(renderMessageCardHtml).join('')
   const attachmentItems = renderPreviewAttachments(report.attachments)
   const markdownPath = vscode.workspace.asRelativePath(report.markdownUri, false)
+  const promptPath = report.promptUri ? vscode.workspace.asRelativePath(report.promptUri, false) : ''
 
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -2525,6 +2635,7 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
         <button id="open-markdown" type="button">Markdown を開く</button>
         <span class="path">${escapeHtml(markdownPath)}</span>
       </div>
+      ${renderPromptFileAction(promptPath)}
     </header>
 
     <section>
@@ -2552,9 +2663,26 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
     document.getElementById('open-markdown').addEventListener('click', () => {
       vscode.postMessage({ command: 'openMarkdown' });
     });
+    const promptButton = document.getElementById('open-prompt-file');
+    if (promptButton) {
+      promptButton.addEventListener('click', () => {
+        vscode.postMessage({ command: 'openPromptFile' });
+      });
+    }
   </script>
 </body>
 </html>`
+}
+
+function renderPromptFileAction(promptPath: string): string {
+  if (!promptPath) {
+    return ''
+  }
+
+  return `<div class="actions">
+        <button id="open-prompt-file" type="button">Prompt を開く</button>
+        <span class="path">${escapeHtml(promptPath)}</span>
+      </div>`
 }
 
 function renderMetaItem(label: string, value: string): string {

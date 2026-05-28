@@ -14,8 +14,14 @@ interface ExtensionSettings {
   includeContext: boolean
   contextBudget: number
   generatePromptFile: boolean
+  includeUncommittedChanges: boolean
   activePreset: string
   presets: Record<string, ModelPreset>
+}
+
+interface ReviewDiffSource {
+  label: string
+  args: string[]
 }
 
 type ModelPresetRoleName = 'reviewer' | 'examiner' | 'rebuttal'
@@ -532,6 +538,7 @@ function readSettings(): ExtensionSettings {
     includeContext: config.get('includeContext', true),
     contextBudget: config.get('contextBudget', 220_000),
     generatePromptFile: config.get('generatePromptFile', true),
+    includeUncommittedChanges: config.get('includeUncommittedChanges', true),
     activePreset: config.get('activePreset', '').trim(),
     presets: normalizeModelPresets(config.get('presets', {})),
   }
@@ -1555,18 +1562,39 @@ async function collectReviewInput(
 ): Promise<{ repositoryRoot: string; diffRange: string; diffPatch: string; codeContext?: string }> {
   const repositoryRoot = await resolveRepositoryRoot(workspaceRoot)
   const baseBranch = await inferReviewBaseBranch(repositoryRoot)
-  const diffRange = `${baseBranch}...HEAD`
-  const diffPatch = await readReviewDiff(repositoryRoot, diffRange)
+  const diffSource = await resolveReviewDiffSource(repositoryRoot, baseBranch, settings.includeUncommittedChanges)
+  const diffPatch = await readReviewDiff(repositoryRoot, diffSource)
 
   if (!diffPatch.trim()) {
-    throw new Error(`レビュー対象の Git 変更差分が見つかりませんでした (${diffRange})`)
+    throw new Error(`レビュー対象の Git 変更差分が見つかりませんでした (${diffSource.label})`)
   }
 
   const codeContext = settings.includeContext
     ? await buildCodeContext(repositoryRoot, diffPatch, settings.contextBudget)
     : undefined
 
-  return { repositoryRoot, diffRange, diffPatch, codeContext: codeContext || undefined }
+  return { repositoryRoot, diffRange: diffSource.label, diffPatch, codeContext: codeContext || undefined }
+}
+
+async function resolveReviewDiffSource(
+  repositoryRoot: string,
+  baseBranch: string,
+  includeUncommittedChanges: boolean,
+): Promise<ReviewDiffSource> {
+  if (!includeUncommittedChanges) {
+    const diffRange = `${baseBranch}...HEAD`
+    return { label: diffRange, args: [diffRange] }
+  }
+
+  try {
+    const mergeBase = (await runGit(repositoryRoot, ['merge-base', 'HEAD', baseBranch])).trim()
+    if (!mergeBase) {
+      throw new Error('empty merge-base')
+    }
+    return { label: `${baseBranch}...HEAD + working tree`, args: [mergeBase] }
+  } catch (error) {
+    throw new Error(`レビュー差分の基点となる merge-base の取得に失敗しました (${baseBranch}): ${formatError(error)}`)
+  }
 }
 
 async function resolveRepositoryRoot(workspaceRoot: string): Promise<string> {
@@ -1640,11 +1668,11 @@ async function getDefaultBranch(repositoryRoot: string): Promise<string> {
   return 'main'
 }
 
-async function readReviewDiff(repositoryRoot: string, diffRange: string): Promise<string> {
+async function readReviewDiff(repositoryRoot: string, diffSource: ReviewDiffSource): Promise<string> {
   try {
-    return await runGit(repositoryRoot, ['diff', '--no-ext-diff', diffRange, '--'])
+    return await runGit(repositoryRoot, ['diff', '--no-ext-diff', ...diffSource.args, '--'])
   } catch (error) {
-    throw new Error(`レビュー差分の生成に失敗しました (${diffRange}): ${formatError(error)}`)
+    throw new Error(`レビュー差分の生成に失敗しました (${diffSource.label}): ${formatError(error)}`)
   }
 }
 

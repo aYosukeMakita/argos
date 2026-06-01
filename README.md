@@ -1,6 +1,6 @@
 # ARGOS 自動レビュー VS Code 拡張
 
-このリポジトリは、Copilot Language Model API を使って VS Code 内から ARGOS 自動レビューを実行する private 拡張本体だけを含みます。以前存在していた `mcp-server` と `web-ui` は削除され、現在はこのディレクトリ単体でビルドと配布が完結します。
+Copilot Language Model API を使って VS Code 内から ARGOS 自動レビューを実行する拡張機能です。このリポジトリ単体でビルドと配布が完結します。
 
 ## 使い方
 
@@ -59,21 +59,27 @@ User Settings JSON の例:
 
 ```json
 {
-	"argos.activePreset": "balanced",
-	"argos.presets": {
-		"balanced": {
-			"label": "Balanced",
-			"reviewer": { "model": "Claude Opus 4.7" },
-			"examiner": { "model": "GPT-5.4" },
-			"rebuttal": { "model": "Claude Sonnet 4.6" }
-		},
-		"strict": {
-			"label": "Strict",
-			"reviewer": { "model": "GPT-5.5" },
-			"examiner": { "model": "Claude Opus 4.7" },
-			"rebuttal": { "model": "GPT-5.4" }
-		}
-	}
+    "argos.activePreset": "model1",
+    "argos.presets": {
+        "model1": {
+            "label": "バランス型",
+            "reviewer": { "model": "GPT-5.5" },
+            "examiner": { "model": "Claude Sonnet 4.6" },
+            "rebuttal": { "model": "GPT-5.4" },
+        },
+        "model2": {
+            "label": "低コスト",
+            "reviewer": { "model": "Claude Opus 4.6" },
+            "examiner": { "model": "GPT-5.4" },
+            "rebuttal": { "model": "Claude Sonnet 4.6" },
+        },
+        "model3": {
+            "label": "最高性能",
+            "reviewer": { "model": "Claude Opus 4.7" },
+            "examiner": { "model": "GPT-5.5" },
+            "rebuttal": { "model": "Claude Sonnet 4.6" },
+        }
+    },
 }
 ```
 

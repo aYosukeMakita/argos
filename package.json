@@ -2,7 +2,7 @@
   "name": "argos-vscode-extension",
   "displayName": "ARGOS Auto Review",
   "description": "Run ARGOS auto review with VS Code Copilot language models.",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "private": true,
   "publisher": "argos",
   "files": [

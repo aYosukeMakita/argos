@@ -55,7 +55,13 @@ npm run build
 - `argos.generatePromptFile`: レビュー完了後に Copilot への追加質問・修正依頼用 `.github/prompts/*.prompt.md` を生成します。既定値は `true` です。
 - `argos.includeUncommittedChanges`: レビュー差分にステージ済み変更と未ステージの追跡済みファイル変更を含めます。未追跡ファイルは含まれません。既定値は `true` です。
 - `argos.activePreset`: 既定選択として使うモデル preset 名です。
-- `argos.presets`: レビュワー（初回） / 任意のレビュワー（初回・2人目） / 任意の統合者 / 評価者 / レビュワー（2, 3回目）の名前付きモデルプリセットです。`reviewer2` と `consolidator` はセットで指定します。リポジトリや worktree をまたいで同じ個人用プリセットを使いたい場合は、VS Code の User Settings に設定します。
+- `argos.presets`: レビュワー（初回） / 任意のレビュワー（初回・2人目） / 任意の統合者 / 評価者 / レビュワー（2, 3回目）の名前付きモデルプリセットです。`reviewer2` と `consolidator` はセットで指定します。リポジトリや worktree をまたいで同じ個人用プリセットを使いたい場合は、VS Code の User Settings に設定します。各プリセットには以下のプロパティを指定できます：
+  - `reviewer` — レビュワー（初回）モデル（必須）
+  - `examiner` — 評価者モデル（必須）
+  - `rebuttal` — レビュワー（2, 3回目）モデル（必須）
+  - `useSecondReviewer` — 第2レビュワーと統合者をデフォルトで有効にするかどうか。省略時は `reviewer2` が定義されていれば `true`、なければ `false`
+  - `reviewer2` — 第2レビュワー（初回）モデル（`consolidator` とセット）
+  - `consolidator` — 統合者モデル（`reviewer2` とセット）
 
 User Settings JSON の例:
 
@@ -67,24 +73,25 @@ User Settings JSON の例:
             "label": "バランス型",
             "reviewer": { "model": "GPT-5.5" },
             "examiner": { "model": "Claude Sonnet 4.6" },
-            "rebuttal": { "model": "GPT-5.4" },
+            "rebuttal": { "model": "GPT-5.4" }
         },
         "model2": {
             "label": "低コスト",
             "reviewer": { "model": "Claude Opus 4.6" },
             "examiner": { "model": "GPT-5.4" },
-            "rebuttal": { "model": "Claude Sonnet 4.6" },
+            "rebuttal": { "model": "Claude Sonnet 4.6" }
         },
         "model3": {
             "label": "最高性能",
+            "useSecondReviewer": true,
             "reviewer": { "model": "Claude Opus 4.7" },
             "reviewer2": { "model": "GPT-5.5" },
             "consolidator": { "model": "Claude Sonnet 4.6" },
             "examiner": { "model": "GPT-5.5" },
-            "rebuttal": { "model": "Claude Sonnet 4.6" },
+            "rebuttal": { "model": "Claude Sonnet 4.6" }
         }
-    },
+    }
 }
 ```
 
-`model` の値には、内部 model ID ではなく、VS Code 上でユーザーに表示されるモデルラベルを指定します。
+`model` の値には、内部 model ID ではなく、VS Code 上でユーザーに表示されるモデルラベルを指定します。`useSecondReviewer` を明示しない場合、`reviewer2` が定義されていればチェックボックスがデフォルトで ON になります。`useSecondReviewer: false` を明示すると、`reviewer2` / `consolidator` が定義されていてもチェックボックスはデフォルト OFF になります。

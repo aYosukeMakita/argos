@@ -33,6 +33,7 @@ interface ModelPresetRole {
 interface ModelPreset {
   label?: string
   description?: string
+  useSecondReviewer?: boolean
   reviewer?: ModelPresetRole
   reviewer2?: ModelPresetRole
   consolidator?: ModelPresetRole
@@ -662,9 +663,9 @@ async function showReviewForm(
   const serializedPresets = serializePresets(settings, availableModels)
   const defaultReviewer =
     presetModels?.reviewer ?? rankModels(availableModels, reviewerModelKeywords)[0] ?? sortedModels[0]
-  const defaultReviewer2 = presetModels?.reviewer2 ?? defaultReviewer
   const defaultExaminer =
     presetModels?.examiner ?? rankModels(availableModels, examinerModelKeywords)[0] ?? sortedModels[0]
+  const defaultReviewer2 = presetModels?.reviewer2 ?? defaultReviewer
   const defaultConsolidator = presetModels?.consolidator ?? defaultExaminer
   const defaultRebuttal = presetModels?.rebuttal ?? defaultExaminer
   const labels = getReviewFormLabels(vscode.env.language)
@@ -685,7 +686,9 @@ async function showReviewForm(
     defaultReviewerId: defaultReviewer.id,
     defaultReviewer2Id: defaultReviewer2.id,
     defaultConsolidatorId: defaultConsolidator.id,
-    useSecondReviewerByDefault: Boolean(presetModels?.reviewer2),
+    useSecondReviewerByDefault: settings.activePreset
+      ? (settings.presets[settings.activePreset]?.useSecondReviewer ?? Boolean(presetModels?.reviewer2))
+      : false,
     defaultExaminerId: defaultExaminer.id,
     defaultRebuttalId: defaultRebuttal.id,
     labels,
@@ -802,6 +805,7 @@ function normalizeModelPresets(value: unknown): Record<string, ModelPreset> {
     presets[presetName] = {
       label: normalizeOptionalString(record.label),
       description: normalizeOptionalString(record.description),
+      useSecondReviewer: typeof record.useSecondReviewer === 'boolean' ? record.useSecondReviewer : undefined,
       reviewer: normalizePresetRole(record.reviewer),
       reviewer2: normalizePresetRole(record.reviewer2),
       consolidator: normalizePresetRole(record.consolidator),

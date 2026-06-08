@@ -77,6 +77,10 @@
                 "type": "string",
                 "description": "Human-readable description for the preset."
               },
+              "useSecondReviewer": {
+                "type": "boolean",
+                "description": "Whether to enable the second reviewer and consolidator by default for this preset. Defaults to true if reviewer2 is defined, false otherwise."
+              },
               "reviewer": {
                 "type": "object",
                 "description": "Reviewer model selection.",

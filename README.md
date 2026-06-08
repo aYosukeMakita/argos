@@ -77,17 +77,17 @@ User Settings JSON の例:
         },
         "model2": {
             "label": "低コスト",
-            "reviewer": { "model": "Claude Opus 4.6" },
+            "reviewer": { "model": "Claude Sonnet 4.6" },
             "examiner": { "model": "GPT-5.4" },
             "rebuttal": { "model": "Claude Sonnet 4.6" }
         },
         "model3": {
             "label": "最高性能",
             "useSecondReviewer": true,
-            "reviewer": { "model": "Claude Opus 4.7" },
-            "reviewer2": { "model": "GPT-5.5" },
+            "reviewer": { "model": "GPT-5.5" },
+            "reviewer2": { "model": "Claude Opus 4.8" },
             "consolidator": { "model": "Claude Sonnet 4.6" },
-            "examiner": { "model": "GPT-5.5" },
+            "examiner": { "model": "GPT-5.4" },
             "rebuttal": { "model": "Claude Sonnet 4.6" }
         }
     }

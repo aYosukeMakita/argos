@@ -5,7 +5,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import * as vscode from 'vscode'
 
-type MessageAgent = 'REVIEWER' | 'EXAMINER' | 'REBUTTAL'
+type MessageAgent = 'REVIEWER' | 'CONSOLIDATOR' | 'EXAMINER' | 'REBUTTAL'
 type NextActor = 'EXAMINER' | 'REBUTTAL'
 type FinalJudgment = 'OK' | 'NG'
 type CompletionReason = 'approved' | 'max_rounds_reached'
@@ -24,7 +24,7 @@ interface ReviewDiffSource {
   args: string[]
 }
 
-type ModelPresetRoleName = 'reviewer' | 'examiner' | 'rebuttal'
+type ModelPresetRoleName = 'reviewer' | 'reviewer2' | 'consolidator' | 'examiner' | 'rebuttal'
 
 interface ModelPresetRole {
   model: string
@@ -34,6 +34,8 @@ interface ModelPreset {
   label?: string
   description?: string
   reviewer?: ModelPresetRole
+  reviewer2?: ModelPresetRole
+  consolidator?: ModelPresetRole
   examiner?: ModelPresetRole
   rebuttal?: ModelPresetRole
 }
@@ -92,6 +94,8 @@ interface RunInput {
 
 interface SelectedModels {
   reviewer: vscode.LanguageModelChat
+  reviewer2?: vscode.LanguageModelChat
+  consolidator?: vscode.LanguageModelChat
   examiner: vscode.LanguageModelChat
   rebuttal: vscode.LanguageModelChat
 }
@@ -148,6 +152,8 @@ interface SerializedPreset {
   name: string
   label: string
   reviewerModelId: string
+  reviewer2ModelId?: string
+  consolidatorModelId?: string
   examinerModelId: string
   rebuttalModelId: string
 }
@@ -161,6 +167,9 @@ interface ReviewFormLabels {
   models: string
   preset: string
   reviewerModelLabel: string
+  useSecondReviewerLabel: string
+  reviewer2ModelLabel: string
+  consolidatorModelLabel: string
   examinerModelLabel: string
   rebuttalModelLabel: string
   reviewRequirements: string
@@ -196,6 +205,8 @@ interface ReviewReport {
   completionReason: CompletionReason
   models: {
     reviewer: string
+    reviewer2?: string
+    consolidator?: string
     examiner: string
     rebuttal: string
   }
@@ -279,24 +290,19 @@ const examinerModelKeywords = [
   'gemini',
 ]
 
-const premiumRequestMultiplierRules: Array<{ pattern: RegExp; multiplier: string }> = [
-  { pattern: /claude[\s._-]*opus[\s._-]*4[\s._-]*(?:5|6|7|8)\b/i, multiplier: '15x' },
-  { pattern: /claude[\s._-]*sonnet[\s._-]*4(?:[\s._-]*(?:5|6))?(?![\s._-]*\d)\b/i, multiplier: '9x' },
-  { pattern: /claude[\s._-]*haiku[\s._-]*4[\s._-]*5\b/i, multiplier: '3x' },
-  { pattern: /gemini[\s._-]*3[\s._-]*5[\s._-]*flash\b/i, multiplier: '4.8x' },
-  { pattern: /gemini[\s._-]*3[\s._-]*1[\s._-]*pro\b/i, multiplier: '6.4x' },
-  { pattern: /gemini[\s._-]*3(?![\s._-]*\d)(?:[\s._-]*flash|\s+flash)\b/i, multiplier: '1.6x' },
-  { pattern: /gemini[\s._-]*2[\s._-]*5[\s._-]*pro\b/i, multiplier: '4.5x' },
-  { pattern: /gpt[\s._-]*5[\s._-]*5\b/i, multiplier: '16x' },
-  { pattern: /gpt[\s._-]*5[\s._-]*4[\s._-]*mini\b/i, multiplier: '2.4x' },
-  { pattern: /gpt[\s._-]*5[\s._-]*4[\s._-]*nano\b/i, multiplier: '0.65x' },
-  { pattern: /gpt[\s._-]*5[\s._-]*4\b/i, multiplier: '8x' },
-  { pattern: /gpt[\s._-]*5[\s._-]*3[\s._-]*codex\b/i, multiplier: '6.3x' },
-  { pattern: /gpt[\s._-]*5[\s._-]*2[\s._-]*codex\b/i, multiplier: '6.3x' },
-  { pattern: /gpt[\s._-]*5[\s._-]*2\b/i, multiplier: '6.3x' },
-  { pattern: /gpt[\s._-]*5(?![\s._-]*\d)[\s._-]+mini\b/i, multiplier: '0.9x' },
-  { pattern: /raptor[\s._-]*mini\b/i, multiplier: '0.9x' },
-  { pattern: /gpt[\s._-]*4[\s._-]*1\b/i, multiplier: '5.6x' },
+const modelCostLabelRules: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /claude[\s._-]*opus\b/i, label: '高コスト' },
+  { pattern: /claude[\s._-]*sonnet\b/i, label: '中コスト' },
+  { pattern: /claude[\s._-]*haiku\b/i, label: '低コスト' },
+  { pattern: /gemini[\s._-]*3[\s._-]*1[\s._-]*pro\b/i, label: '中コスト' },
+  { pattern: /gemini[\s._-]*3[\s._-]*5[\s._-]*flash\b/i, label: '中コスト' },
+  { pattern: /gemini[\s._-]*2[\s._-]*5[\s._-]*pro\b/i, label: '中コスト' },
+  { pattern: /gemini[\s._-]*3(?![\s._-]*\d)(?:[\s._-]*flash|\s+flash)\b/i, label: '低コスト' },
+  { pattern: /gpt[\s._-]*5[\s._-]*5\b/i, label: '高コスト' },
+  { pattern: /gpt[\s._-]*5[\s._-]*4[\s._-]*mini\b/i, label: '低コスト' },
+  { pattern: /gpt[\s._-]*5(?![\s._-]*\d)[\s._-]+mini\b/i, label: '低コスト' },
+  { pattern: /gpt[\s._-]*5[\s._-]*4\b/i, label: '中コスト' },
+  { pattern: /gpt[\s._-]*5[\s._-]*3[\s._-]*codex\b/i, label: '中コスト' },
 ]
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -333,6 +339,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
   const { models, purpose, attachments } = reviewForm
 
   const reviewerPrompt = await readPromptAsset(context, 'reviewer.md')
+  const consolidatorPrompt = await readPromptAsset(context, 'consolidator.md')
   const examinerPrompt = await readPromptAsset(context, 'examiner.md')
   const rebuttalPrompt = await readPromptAsset(context, 'rebuttal.md')
 
@@ -348,6 +355,12 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       logStep(output, `Workspace: ${workspaceFolder.uri.fsPath}`)
       logStep(output, `Report directory: ${workspaceFolder.uri.fsPath}`)
       logStep(output, `Reviewer model: ${modelNameForStorage(models.reviewer)}`)
+      if (models.reviewer2) {
+        logStep(output, `Reviewer 2 model: ${modelNameForStorage(models.reviewer2)}`)
+      }
+      if (models.consolidator) {
+        logStep(output, `Consolidator model: ${modelNameForStorage(models.consolidator)}`)
+      }
       logStep(output, `Examiner model: ${modelNameForStorage(models.examiner)}`)
       logStep(output, `Rebuttal model: ${modelNameForStorage(models.rebuttal)}`)
 
@@ -374,31 +387,92 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       const messages: DiscussionMessageRecord[] = []
       const createdAt = new Date().toISOString()
 
-      progress.report({ message: `Reviewer を ${models.reviewer.name} で実行しています` })
-      logStep(output, `Reviewer を ${modelNameForStorage(models.reviewer)} で実行します`)
-      const reviewerRaw = await callLanguageModel(
-        models.reviewer,
-        reviewerPromptRequest(reviewerPrompt, input),
-        input,
-        token,
+      progress.report({
+        message: models.reviewer2
+          ? 'Reviewer 1/2 を並列実行しています'
+          : `Reviewer を ${models.reviewer.name} で実行しています`,
+      })
+      logStep(
         output,
-        'Reviewer',
+        models.reviewer2
+          ? `Reviewer 1/2 を並列実行します (${modelNameForStorage(models.reviewer)}, ${modelNameForStorage(models.reviewer2)})`
+          : `Reviewer を ${modelNameForStorage(models.reviewer)} で実行します`,
       )
-      const reviewer = parseJsonObject<ReviewerOutput>(reviewerRaw, validateReviewerOutput, {
-        label: 'Reviewer',
-        output,
-      })
+      const reviewerTasks: Array<Promise<{ label: string; model: vscode.LanguageModelChat; raw: string }>> = [
+        callLanguageModel(
+          models.reviewer,
+          reviewerPromptRequest(reviewerPrompt, input),
+          input,
+          token,
+          output,
+          'Reviewer 1',
+        ).then(raw => ({ label: 'Reviewer 1', model: models.reviewer, raw })),
+      ]
+      if (models.reviewer2) {
+        reviewerTasks.push(
+          callLanguageModel(
+            models.reviewer2,
+            reviewerPromptRequest(reviewerPrompt, input),
+            input,
+            token,
+            output,
+            'Reviewer 2',
+          ).then(raw => ({ label: 'Reviewer 2', model: models.reviewer2 as vscode.LanguageModelChat, raw })),
+        )
+      }
+      const reviewerResults = await Promise.all(reviewerTasks)
       throwIfCancelled(token)
-      messages.push({
-        id: messages.length + 1,
-        session_id: sessionId,
-        round: 1,
-        agent: 'REVIEWER',
-        model_name: modelNameForStorage(models.reviewer),
-        content: reviewer.content,
-        judgment: null,
-        created_at: new Date().toISOString(),
-      })
+      for (const result of reviewerResults) {
+        const reviewer = parseJsonObject<ReviewerOutput>(result.raw, validateReviewerOutput, {
+          label: result.label,
+          output,
+        })
+        messages.push({
+          id: messages.length + 1,
+          session_id: sessionId,
+          round: 1,
+          agent: 'REVIEWER',
+          model_name: modelNameForStorage(result.model),
+          content: reviewer.content,
+          judgment: null,
+          created_at: new Date().toISOString(),
+        })
+      }
+
+      if (models.reviewer2) {
+        if (!models.consolidator) {
+          throw new Error('第2レビュワーを使う場合は統合者モデルが必要です')
+        }
+        progress.report({ message: `統合者を ${models.consolidator.name} で実行しています` })
+        logStep(output, `統合者を ${modelNameForStorage(models.consolidator)} で実行します`)
+        const consolidatorRaw = await callLanguageModel(
+          models.consolidator,
+          consolidatorPromptRequest(
+            consolidatorPrompt,
+            input,
+            messages.filter(message => message.agent === 'REVIEWER'),
+          ),
+          input,
+          token,
+          output,
+          'Consolidator',
+        )
+        const consolidated = parseJsonObject<ReviewerOutput>(consolidatorRaw, validateReviewerOutput, {
+          label: 'Consolidator',
+          output,
+        })
+        throwIfCancelled(token)
+        messages.push({
+          id: messages.length + 1,
+          session_id: sessionId,
+          round: 1,
+          agent: 'CONSOLIDATOR',
+          model_name: modelNameForStorage(models.consolidator),
+          content: consolidated.content,
+          judgment: null,
+          created_at: new Date().toISOString(),
+        })
+      }
       logArtifact(output, `review_id: ${reviewId}`)
       logArtifact(output, `session_id: ${sessionId}`)
 
@@ -518,6 +592,8 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         completionReason: nextAction.completion_reason,
         models: {
           reviewer: modelNameForStorage(models.reviewer),
+          reviewer2: models.reviewer2 ? modelNameForStorage(models.reviewer2) : undefined,
+          consolidator: models.consolidator ? modelNameForStorage(models.consolidator) : undefined,
           examiner: modelNameForStorage(models.examiner),
           rebuttal: modelNameForStorage(models.rebuttal),
         },
@@ -525,7 +601,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       }
       const markdownUri = await writeMarkdownReport(workspaceFolder.uri.fsPath, reportDraft)
       const promptUri = settings.generatePromptFile
-        ? await writePromptFile(workspaceFolder.uri.fsPath, reportDraft, reviewerPrompt, input)
+        ? await writePromptFile(workspaceFolder.uri.fsPath, reportDraft, reviewerPrompt, consolidatorPrompt, input)
         : undefined
       const report: ReviewReport = { ...reportDraft, markdownUri, promptUri }
       const finalJudgment = report.finalJudgment
@@ -586,8 +662,10 @@ async function showReviewForm(
   const serializedPresets = serializePresets(settings, availableModels)
   const defaultReviewer =
     presetModels?.reviewer ?? rankModels(availableModels, reviewerModelKeywords)[0] ?? sortedModels[0]
+  const defaultReviewer2 = presetModels?.reviewer2 ?? defaultReviewer
   const defaultExaminer =
     presetModels?.examiner ?? rankModels(availableModels, examinerModelKeywords)[0] ?? sortedModels[0]
+  const defaultConsolidator = presetModels?.consolidator ?? defaultExaminer
   const defaultRebuttal = presetModels?.rebuttal ?? defaultExaminer
   const labels = getReviewFormLabels(vscode.env.language)
   const panel = vscode.window.createWebviewPanel('argosAutoReview', labels.title, vscode.ViewColumn.Active, {
@@ -605,6 +683,9 @@ async function showReviewForm(
     reviewerModels: sortedModels.map(serializeModel),
     examinerModels: sortedModels.map(serializeModel),
     defaultReviewerId: defaultReviewer.id,
+    defaultReviewer2Id: defaultReviewer2.id,
+    defaultConsolidatorId: defaultConsolidator.id,
+    useSecondReviewerByDefault: Boolean(presetModels?.reviewer2),
     defaultExaminerId: defaultExaminer.id,
     defaultRebuttalId: defaultRebuttal.id,
     labels,
@@ -645,18 +726,24 @@ async function showReviewForm(
 
       try {
         const reviewer = getModelById(modelById, record.reviewerModelId)
+        const useSecondReviewer = record.useSecondReviewer === true
+        const reviewer2 = useSecondReviewer ? getModelById(modelById, record.reviewer2ModelId) : undefined
+        const consolidator = useSecondReviewer ? getModelById(modelById, record.consolidatorModelId) : undefined
         const examiner = getModelById(modelById, record.examinerModelId)
         const rebuttal = getModelById(modelById, record.rebuttalModelId)
         const purpose =
           typeof record.purpose === 'string' && record.purpose.trim() ? record.purpose.trim() : labels.emptyPurpose
         const attachments = deserializeAttachments(record.attachments, labels)
+        const selectedModels = [reviewer, reviewer2, consolidator, examiner, rebuttal].filter(
+          (model): model is vscode.LanguageModelChat => Boolean(model),
+        )
         if (
           attachments.some(attachment => attachment.kind === 'image') &&
-          [reviewer, examiner, rebuttal].some(model => !supportsImageInput(model))
+          selectedModels.some(model => !supportsImageInput(model))
         ) {
           throw new Error(labels.attachmentImageModelError)
         }
-        finish({ purpose, attachments, models: { reviewer, examiner, rebuttal } })
+        finish({ purpose, attachments, models: { reviewer, reviewer2, consolidator, examiner, rebuttal } })
       } catch (error) {
         reject(error)
       }
@@ -678,10 +765,10 @@ async function getAvailableLanguageModels(): Promise<vscode.LanguageModelChat[]>
 }
 
 function serializeModel(model: vscode.LanguageModelChat): SerializedModel {
-  const premiumLabel = getPremiumRequestLabel(model)
+  const costLabel = getModelCostLabel(model)
   return {
     id: model.id,
-    label: `${model.name} (${premiumLabel})`,
+    label: costLabel ? `${model.name} (${costLabel})` : model.name,
     name: model.name,
     description: modelFamilyDescription(model),
     detail: `${model.id} / max input ${model.maxInputTokens.toLocaleString()} tokens`,
@@ -716,6 +803,8 @@ function normalizeModelPresets(value: unknown): Record<string, ModelPreset> {
       label: normalizeOptionalString(record.label),
       description: normalizeOptionalString(record.description),
       reviewer: normalizePresetRole(record.reviewer),
+      reviewer2: normalizePresetRole(record.reviewer2),
+      consolidator: normalizePresetRole(record.consolidator),
       examiner: normalizePresetRole(record.examiner),
       rebuttal: normalizePresetRole(record.rebuttal),
     }
@@ -762,6 +851,8 @@ function serializePresets(
       name: presetName,
       label: preset.label ?? presetName,
       reviewerModelId: models.reviewer.id,
+      reviewer2ModelId: models.reviewer2?.id,
+      consolidatorModelId: models.consolidator?.id,
       examinerModelId: models.examiner.id,
       rebuttalModelId: models.rebuttal.id,
     }
@@ -773,8 +864,18 @@ function resolvePresetModels(
   preset: ModelPreset,
   availableModels: vscode.LanguageModelChat[],
 ): SelectedModels {
+  const hasReviewer2 = Boolean(preset.reviewer2)
+  const hasConsolidator = Boolean(preset.consolidator)
+  if (hasReviewer2 !== hasConsolidator) {
+    throw new Error(`ARGOS preset "${presetName}" must define reviewer2.model and consolidator.model together`)
+  }
+
   return {
     reviewer: resolvePresetRoleModel(presetName, preset, 'reviewer', availableModels),
+    reviewer2: hasReviewer2 ? resolvePresetRoleModel(presetName, preset, 'reviewer2', availableModels) : undefined,
+    consolidator: hasConsolidator
+      ? resolvePresetRoleModel(presetName, preset, 'consolidator', availableModels)
+      : undefined,
     examiner: resolvePresetRoleModel(presetName, preset, 'examiner', availableModels),
     rebuttal: resolvePresetRoleModel(presetName, preset, 'rebuttal', availableModels),
   }
@@ -835,6 +936,9 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
       models: 'モデル',
       preset: 'Preset',
       reviewerModelLabel: 'レビュワー（初回）',
+      useSecondReviewerLabel: '第2レビュワーを使う',
+      reviewer2ModelLabel: 'レビュワー（初回・2人目）',
+      consolidatorModelLabel: '統合者',
       examinerModelLabel: '評価者',
       rebuttalModelLabel: 'レビュワー（2, 3回目）',
       reviewRequirements: 'レビュー観点',
@@ -865,6 +969,9 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
     models: 'Models',
     preset: 'Preset',
     reviewerModelLabel: 'Reviewer',
+    useSecondReviewerLabel: 'Use second reviewer',
+    reviewer2ModelLabel: 'Reviewer 2',
+    consolidatorModelLabel: 'Consolidator',
     examinerModelLabel: 'Examiner',
     rebuttalModelLabel: 'Rebuttal',
     reviewRequirements: 'Review requirements',
@@ -896,12 +1003,17 @@ function renderReviewFormHtml(input: {
   reviewerModels: SerializedModel[]
   examinerModels: SerializedModel[]
   defaultReviewerId: string
+  defaultReviewer2Id: string
+  defaultConsolidatorId: string
+  useSecondReviewerByDefault: boolean
   defaultExaminerId: string
   defaultRebuttalId: string
   labels: ReviewFormLabels
 }): string {
   const presetOptions = renderPresetOptions(input.presets, input.defaultPresetName)
   const reviewerOptions = renderModelOptions(input.reviewerModels, input.defaultReviewerId)
+  const reviewer2Options = renderModelOptions(input.reviewerModels, input.defaultReviewer2Id)
+  const consolidatorOptions = renderModelOptions(input.examinerModels, input.defaultConsolidatorId)
   const examinerOptions = renderModelOptions(input.examinerModels, input.defaultExaminerId)
   const rebuttalOptions = renderModelOptions(input.examinerModels, input.defaultRebuttalId)
   const presetsJson = jsonForInlineScript(input.presets)
@@ -991,6 +1103,47 @@ function renderReviewFormHtml(input: {
       padding: 16px;
       border: 1px solid var(--vscode-panel-border);
       border-radius: 6px;
+    }
+
+    .model-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 22px;
+      margin-bottom: 6px;
+    }
+
+    .checkbox-row input {
+      margin: 0;
+    }
+
+    .checkbox-row label {
+      margin: 0;
+      color: var(--vscode-foreground);
+      font-size: 13px;
+      text-transform: none;
+    }
+
+    select:disabled {
+      opacity: 0.65;
+    }
+
+    .model-field--toggle-spacer::before {
+      content: '';
+      display: block;
+      min-height: 28px;
+    }
+
+    @media (max-width: 620px) {
+      .model-field--toggle-spacer::before {
+        display: none;
+      }
     }
 
     select,
@@ -1147,9 +1300,23 @@ function renderReviewFormHtml(input: {
 
       <fieldset>
         <legend>${escapeHtml(labels.models)}</legend>
+        <div class="model-grid">
+          <div class="model-field model-field--toggle-spacer">
+            <label for="reviewer-model">${escapeHtml(labels.reviewerModelLabel)}</label>
+            <select id="reviewer-model" required>${reviewerOptions}</select>
+          </div>
+          <div class="model-field">
+            <div class="checkbox-row">
+              <input id="use-second-reviewer" type="checkbox"${input.useSecondReviewerByDefault ? ' checked' : ''}>
+              <label for="use-second-reviewer">${escapeHtml(labels.useSecondReviewerLabel)}</label>
+            </div>
+            <label for="reviewer2-model">${escapeHtml(labels.reviewer2ModelLabel)}</label>
+            <select id="reviewer2-model">${reviewer2Options}</select>
+          </div>
+        </div>
         <div>
-          <label for="reviewer-model">${escapeHtml(labels.reviewerModelLabel)}</label>
-          <select id="reviewer-model" required>${reviewerOptions}</select>
+          <label for="consolidator-model">${escapeHtml(labels.consolidatorModelLabel)}</label>
+          <select id="consolidator-model">${consolidatorOptions}</select>
         </div>
         <div>
           <label for="examiner-model">${escapeHtml(labels.examinerModelLabel)}</label>
@@ -1193,6 +1360,9 @@ function renderReviewFormHtml(input: {
     const form = document.getElementById('review-form');
     const modelPreset = document.getElementById('model-preset');
     const reviewerModel = document.getElementById('reviewer-model');
+    const useSecondReviewer = document.getElementById('use-second-reviewer');
+    const reviewer2Model = document.getElementById('reviewer2-model');
+    const consolidatorModel = document.getElementById('consolidator-model');
     const examinerModel = document.getElementById('examiner-model');
     const rebuttalModel = document.getElementById('rebuttal-model');
     const purpose = document.getElementById('purpose');
@@ -1379,25 +1549,72 @@ function renderReviewFormHtml(input: {
 
     renderAttachmentList();
 
+    function updateSecondReviewerControls() {
+      const enabled = useSecondReviewer.checked;
+      reviewer2Model.disabled = !enabled;
+      reviewer2Model.required = enabled;
+      consolidatorModel.disabled = !enabled;
+      consolidatorModel.required = enabled;
+    }
+
+    function findMatchingPreset() {
+      return presets.find(candidate => {
+        if (
+          candidate.reviewerModelId !== reviewerModel.value ||
+          candidate.examinerModelId !== examinerModel.value ||
+          candidate.rebuttalModelId !== rebuttalModel.value
+        ) {
+          return false;
+        }
+
+        const secondReviewerEnabled = useSecondReviewer.checked;
+        const presetUsesSecondReviewer = Boolean(candidate.reviewer2ModelId && candidate.consolidatorModelId);
+        if (secondReviewerEnabled !== presetUsesSecondReviewer) {
+          return false;
+        }
+
+        if (!secondReviewerEnabled) {
+          return true;
+        }
+
+        return candidate.reviewer2ModelId === reviewer2Model.value && candidate.consolidatorModelId === consolidatorModel.value;
+      });
+    }
+
+    function updatePresetSelection() {
+      const preset = findMatchingPreset();
+      modelPreset.value = preset?.name ?? '';
+    }
+
+    updateSecondReviewerControls();
+
     modelPreset.addEventListener('change', () => {
       const preset = presets.find(candidate => candidate.name === modelPreset.value);
       if (!preset) {
         return;
       }
       reviewerModel.value = preset.reviewerModelId;
+      if (preset.reviewer2ModelId && preset.consolidatorModelId) {
+        useSecondReviewer.checked = true;
+        reviewer2Model.value = preset.reviewer2ModelId;
+        consolidatorModel.value = preset.consolidatorModelId;
+      } else {
+        useSecondReviewer.checked = false;
+      }
       examinerModel.value = preset.examinerModelId;
       rebuttalModel.value = preset.rebuttalModelId;
+      updateSecondReviewerControls();
     });
 
-    [reviewerModel, examinerModel, rebuttalModel].forEach(select => {
+    [reviewerModel, reviewer2Model, consolidatorModel, examinerModel, rebuttalModel].forEach(select => {
       select.addEventListener('change', () => {
-        const preset = presets.find(candidate =>
-          candidate.reviewerModelId === reviewerModel.value &&
-          candidate.examinerModelId === examinerModel.value &&
-          candidate.rebuttalModelId === rebuttalModel.value
-        );
-        modelPreset.value = preset?.name ?? '';
+        updatePresetSelection();
       });
+    });
+
+    useSecondReviewer.addEventListener('change', () => {
+      updateSecondReviewerControls();
+      updatePresetSelection();
     });
 
     document.getElementById('cancel').addEventListener('click', () => {
@@ -1409,6 +1626,9 @@ function renderReviewFormHtml(input: {
       vscode.postMessage({
         command: 'submit',
         reviewerModelId: reviewerModel.value,
+        useSecondReviewer: useSecondReviewer.checked,
+        reviewer2ModelId: reviewer2Model.value,
+        consolidatorModelId: consolidatorModel.value,
         examinerModelId: examinerModel.value,
         rebuttalModelId: rebuttalModel.value,
         purpose: purpose.value,
@@ -1530,14 +1750,14 @@ function modelFamilyDescription(model: vscode.LanguageModelChat): string {
   return [model.vendor, model.family, model.version].filter(Boolean).join(' / ')
 }
 
-function getPremiumRequestLabel(model: vscode.LanguageModelChat): string {
+function getModelCostLabel(model: vscode.LanguageModelChat): string {
   if (isAutoModel(model)) {
-    return '10% discount'
+    return ''
   }
 
   const haystack = [model.name, model.id, model.vendor, model.family, model.version].filter(Boolean).join(' ')
-  const matchedRule = premiumRequestMultiplierRules.find(rule => rule.pattern.test(haystack))
-  return matchedRule?.multiplier ?? '1x'
+  const matchedRule = modelCostLabelRules.find(rule => rule.pattern.test(haystack))
+  return matchedRule?.label ?? ''
 }
 
 function isAutoModel(model: vscode.LanguageModelChat): boolean {
@@ -1879,6 +2099,25 @@ function discussionPromptRequest(
   }
 }
 
+function consolidatorPromptRequest(
+  systemPrompt: string,
+  input: RunInput,
+  reviewerMessages: DiscussionMessageRecord[],
+): PromptRequest {
+  const findingIds = extractFindingIdsFromMessages(reviewerMessages)
+  const reviewerDiscussion = formatMessages(reviewerMessages)
+
+  return {
+    full: buildPromptCandidate(
+      systemPrompt,
+      consolidatorUserInput(input, reviewerDiscussion),
+      'full',
+      discussionPromptBreakdown(systemPrompt, input, reviewerDiscussion, 'reviewer findings'),
+      findingIds,
+    ),
+  }
+}
+
 function conclusionPromptRequest(
   systemPrompt: string,
   input: RunInput,
@@ -1915,19 +2154,23 @@ function discussionUserInput(input: RunInput, discussion: string): string {
   return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${discussion}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
+function consolidatorUserInput(input: RunInput, reviewerDiscussion: string): string {
+  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\n一次レビュー結果:\n${reviewerDiscussion}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+}
+
 function conclusionSystemPrompt(): string {
   return `あなたは ARGOS の最終結論を作成します。
 
 ## 目的
 
-reviewer / examiner / rebuttal の議論から、人間が最終確認すべきバグ候補を抽出してください。
+reviewer / consolidator / examiner / rebuttal の議論から、人間が最終確認すべきバグ候補を抽出してください。
 
 ## 制約
 
 - 除外するのは、最終 examiner が誤検知、論理破綻、根拠なしと明確に否定した指摘だけにする
 - 差分外であることだけを理由に除外しない
 - 最終 examiner が妥当、一部妥当、一部要再検討、要再検討、前提依存、根拠不足だが否定不能、判断分かれとして扱った指摘は含める
-- reviewer / examiner / rebuttal の見解が一致しない指摘は、人間が判断できるように「要確認」として含める
+- reviewer / consolidator / examiner / rebuttal の見解が一致しない指摘は、人間が判断できるように「要確認」として含める
 - 最終判定が NG の場合は、NG の理由になった指摘または未解消の論点を必ず結論に含める
 - 新しい指摘を作らない
 - 含める指摘が 1 件もない場合だけ「最終的にバグと判定された指摘はありません。」とだけ書く
@@ -2013,12 +2256,11 @@ function formatMessages(messages: DiscussionMessageRecord[]): string {
 }
 
 function formatCompactMessages(messages: DiscussionMessageRecord[], findingIds: string[]): string {
-  const reviewerIndex = messages.findIndex(message => message.agent === 'REVIEWER')
   const latestIndex = messages.length - 1
   const manifest = [
     '入力サイズ制御:',
     '- token 上限が近い場合、この会話セクションでは古いラウンドを機械抽出要約に圧縮しています。',
-    '- Round 1 REVIEWER の元指摘と直近メッセージは全文です。',
+    '- Round 1 REVIEWER / CONSOLIDATOR の元指摘と直近メッセージは全文です。',
     '- 要約済み部分に判断に必要な根拠が不足している場合は、断定せず「根拠不足」として扱ってください。',
     '',
     '指摘 ID 台帳:',
@@ -2030,13 +2272,17 @@ function formatCompactMessages(messages: DiscussionMessageRecord[], findingIds: 
   ].join('\n')
 
   const compactedMessages = messages.map((message, index) => {
-    if (index === reviewerIndex || index === latestIndex) {
+    if (index === latestIndex || isInitialReviewerSideMessage(message)) {
       return formatDiscussionMessage(message)
     }
     return formatCompactDiscussionMessage(message)
   })
 
   return [manifest, ...compactedMessages].join('\n\n---\n\n')
+}
+
+function isInitialReviewerSideMessage(message: DiscussionMessageRecord): boolean {
+  return message.round === 1 && (message.agent === 'REVIEWER' || message.agent === 'CONSOLIDATOR')
 }
 
 function formatDiscussionMessage(message: DiscussionMessageRecord): string {
@@ -2101,7 +2347,7 @@ function isImportantDiscussionLine(line: string): boolean {
   return (
     /^#{1,6}\s+/.test(line) ||
     /\b[HML]\d+\b/.test(line) ||
-    /^[-*]\s*(重大度|判定|対象|結論|問題|根拠|理由|発生条件|再現条件|影響|修正方針|反論|受け入れ|前提|根拠グレード|反証可能性|重大度妥当性|最小修正|reviewer の見解|examiner の指摘)\s*[:：]/i.test(
+    /^[-*]\s*(重大度|判定|対象|結論|問題|根拠|理由|発生条件|再現条件|影響|修正方針|反論|受け入れ|前提|出典|元指摘|統合|根拠グレード|反証可能性|重大度妥当性|最小修正|reviewer の見解|examiner の指摘)\s*[:：]/i.test(
       line,
     )
   )
@@ -2116,8 +2362,14 @@ function truncateText(value: string, maxChars: number): string {
 }
 
 function extractFindingIdsFromReviewer(messages: DiscussionMessageRecord[]): string[] {
-  const reviewer = messages.find(message => message.agent === 'REVIEWER')
-  return extractFindingIds(reviewer?.content ?? formatMessages(messages))
+  const reviewerSideMessages = messages.filter(
+    message => message.agent === 'REVIEWER' || message.agent === 'CONSOLIDATOR',
+  )
+  return extractFindingIdsFromMessages(reviewerSideMessages.length > 0 ? reviewerSideMessages : messages)
+}
+
+function extractFindingIdsFromMessages(messages: DiscussionMessageRecord[]): string[] {
+  return extractFindingIds(messages.map(message => message.content).join('\n\n'))
 }
 
 function extractFindingIds(text: string): string[] {
@@ -2203,7 +2455,8 @@ async function callLanguageModel(
     response = await model.sendRequest(
       [preparedInput.message],
       {
-        justification: 'ARGOS 自動レビューで reviewer / examiner / rebuttal を実行するために利用します。',
+        justification:
+          'ARGOS 自動レビューで reviewer / consolidator / examiner / rebuttal を実行するために利用します。',
       },
       token,
     )
@@ -2647,12 +2900,16 @@ async function writePromptFile(
   workspaceRoot: string,
   report: Omit<ReviewReport, 'markdownUri' | 'promptUri'>,
   reviewerPrompt: string,
+  consolidatorPrompt: string,
   input: RunInput,
 ): Promise<vscode.Uri> {
   const directoryUri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), '.github', 'prompts')
   await vscode.workspace.fs.createDirectory(directoryUri)
   const promptUri = vscode.Uri.joinPath(directoryUri, `argos-${report.sessionId}.prompt.md`)
-  await vscode.workspace.fs.writeFile(promptUri, textEncoder.encode(renderPromptFile(report, reviewerPrompt, input)))
+  await vscode.workspace.fs.writeFile(
+    promptUri,
+    textEncoder.encode(renderPromptFile(report, reviewerPrompt, consolidatorPrompt, input)),
+  )
   return promptUri
 }
 
@@ -2672,6 +2929,8 @@ function renderReportMarkdown(report: Omit<ReviewReport, 'markdownUri'>): string
     `- リポジトリ: ${report.repositoryRoot}`,
     `- 差分範囲: ${report.diffRange}`,
     `- レビュワー（初回）モデル: ${report.models.reviewer}`,
+    ...formatOptionalModelLine('レビュワー（初回・2人目）モデル', report.models.reviewer2),
+    ...formatOptionalModelLine('統合者モデル', report.models.consolidator),
     `- 評価者モデル: ${report.models.examiner}`,
     `- レビュワー（2, 3回目）モデル: ${report.models.rebuttal}`,
     '',
@@ -2708,6 +2967,7 @@ function renderReportMarkdown(report: Omit<ReviewReport, 'markdownUri'>): string
 function renderPromptFile(
   report: Omit<ReviewReport, 'markdownUri' | 'promptUri'>,
   reviewerPrompt: string,
+  consolidatorPrompt: string,
   input: RunInput,
 ): string {
   const lines = [
@@ -2717,7 +2977,7 @@ function renderPromptFile(
     'agent: "agent"',
     '---',
     '',
-    'あなたは ARGOS のレビュー後 Q&A と修正作業を支援します。以下の reviewer システムプロンプト、レビュー対象入力、レビュー結果、議論を前提に、ユーザーの質問へ日本語で対応してください。',
+    'あなたは ARGOS のレビュー後 Q&A と修正作業を支援します。以下の reviewer システムプロンプト、必要に応じて統合者システムプロンプト、レビュー対象入力、レビュー結果、議論を前提に、ユーザーの質問へ日本語で対応してください。',
     '',
     '主な用途:',
     '- 不具合の再現方法を、差分と指摘根拠に基づいて具体化する',
@@ -2736,6 +2996,7 @@ function renderPromptFile(
     '<<<ARGOS_REVIEWER_SYSTEM_PROMPT',
     reviewerPrompt.trim(),
     'ARGOS_REVIEWER_SYSTEM_PROMPT>>>',
+    ...formatConsolidatorPromptForPromptFile(report, consolidatorPrompt),
     '',
     '## レビュー対象入力',
     '',
@@ -2758,6 +3019,28 @@ function renderPromptFile(
   ]
 
   return `${lines.join('\n').trim()}\n`
+}
+
+function formatOptionalModelLine(label: string, value: string | undefined): string[] {
+  return value ? [`- ${label}: ${value}`] : []
+}
+
+function formatConsolidatorPromptForPromptFile(
+  report: Omit<ReviewReport, 'markdownUri' | 'promptUri'>,
+  consolidatorPrompt: string,
+): string[] {
+  if (!report.models.consolidator) {
+    return []
+  }
+
+  return [
+    '',
+    '## 統合者システムプロンプト',
+    '',
+    '<<<ARGOS_CONSOLIDATOR_SYSTEM_PROMPT',
+    consolidatorPrompt.trim(),
+    'ARGOS_CONSOLIDATOR_SYSTEM_PROMPT>>>',
+  ]
 }
 
 function formatAttachmentContextForPrompt(input: RunInput): string {
@@ -3050,6 +3333,8 @@ function renderReviewPreviewHtml(input: { cspSource: string; nonce: string; repo
         ${renderMetaItem('リポジトリ', report.repositoryRoot)}
         ${renderMetaItem('差分範囲', report.diffRange)}
         ${renderMetaItem('レビュワー（初回）モデル', report.models.reviewer)}
+        ${renderOptionalMetaItem('レビュワー（初回・2人目）モデル', report.models.reviewer2)}
+        ${renderOptionalMetaItem('統合者モデル', report.models.consolidator)}
         ${renderMetaItem('評価者モデル', report.models.examiner)}
         ${renderMetaItem('レビュワー（2, 3回目）モデル', report.models.rebuttal)}
       </div>
@@ -3109,6 +3394,10 @@ function renderPromptFileAction(promptPath: string): string {
 
 function renderMetaItem(label: string, value: string): string {
   return `<div class="meta-item"><span class="meta-label">${escapeHtml(label)}</span><div class="meta-value">${escapeHtml(value)}</div></div>`
+}
+
+function renderOptionalMetaItem(label: string, value: string | undefined): string {
+  return value ? renderMetaItem(label, value) : ''
 }
 
 function renderPreviewAttachments(attachments: Array<Pick<ReviewAttachment, 'kind' | 'name' | 'mimeType'>>): string {
@@ -3246,6 +3535,9 @@ function renderInlineMarkdown(value: string): string {
 function formatAgentLabel(agent: MessageAgent): string {
   if (agent === 'REVIEWER') {
     return 'レビュワー（初回）'
+  }
+  if (agent === 'CONSOLIDATOR') {
+    return '統合者'
   }
   if (agent === 'EXAMINER') {
     return '評価者'

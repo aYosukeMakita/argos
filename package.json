@@ -2,7 +2,7 @@
   "name": "argos-vscode-extension",
   "displayName": "ARGOS Auto Review",
   "description": "Run ARGOS auto review with VS Code Copilot language models.",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "private": true,
   "publisher": "argos",
   "files": [
@@ -60,12 +60,12 @@
         "argos.activePreset": {
           "type": "string",
           "default": "",
-          "description": "Name of the ARGOS model preset to use as the default reviewer, examiner, and rebuttal selection."
+          "description": "Name of the ARGOS model preset to use as the default reviewer, optional second reviewer, consolidator, examiner, and rebuttal selection."
         },
         "argos.presets": {
           "type": "object",
           "default": {},
-          "description": "Named ARGOS model presets. Model values must be the user-visible model labels shown by VS Code, such as 'Claude Opus 4.7' or 'GPT-5.4'.",
+          "description": "Named ARGOS model presets. Model values must be the user-visible model labels shown by VS Code, such as 'Claude Opus 4.7' or 'GPT-5.4'. Optional reviewer2 and consolidator entries must be defined together.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -87,6 +87,34 @@
                   "model": {
                     "type": "string",
                     "description": "User-visible model label, such as 'Claude Opus 4.7'."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "reviewer2": {
+                "type": "object",
+                "description": "Optional second initial reviewer model selection. Must be paired with consolidator.",
+                "required": [
+                  "model"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "User-visible model label, such as 'Claude Opus 4.8'."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "consolidator": {
+                "type": "object",
+                "description": "Optional consolidator model selection used to normalize multiple initial reviewer outputs. Must be paired with reviewer2.",
+                "required": [
+                  "model"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "User-visible model label, such as 'Claude Sonnet 4.6' or 'GPT-5.4'."
                   }
                 },
                 "additionalProperties": false

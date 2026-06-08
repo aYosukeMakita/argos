@@ -112,6 +112,30 @@ interface ReviewAttachment {
   content: string | Uint8Array
 }
 
+type PromptMode = 'full' | 'compact'
+
+interface InputSizeBreakdownItem {
+  label: string
+  chars: number
+}
+
+interface PromptCandidate {
+  mode: PromptMode
+  text: string
+  breakdown: InputSizeBreakdownItem[]
+  findingIds: string[]
+}
+
+interface PromptRequest {
+  full: PromptCandidate
+  compact?: PromptCandidate
+}
+
+interface MeasuredPromptCandidate extends PromptCandidate {
+  message: vscode.LanguageModelChatMessage
+  tokenCount: number
+}
+
 interface SerializedModel {
   id: string
   label: string
@@ -183,6 +207,10 @@ const textDecoder = new TextDecoder('utf8')
 const textEncoder = new TextEncoder()
 const maxImageAttachments = 5
 const maxTotalAttachments = 10
+const inputCompactionThresholdRatio = 0.85
+const inputWarningThresholdRatio = 0.8
+const compactMessageMaxChars = 8_000
+const compactFindingSectionMaxChars = 1_600
 
 const metadataFiles = [
   'package.json',
@@ -350,7 +378,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       logStep(output, `Reviewer を ${modelNameForStorage(models.reviewer)} で実行します`)
       const reviewerRaw = await callLanguageModel(
         models.reviewer,
-        buildPrompt(reviewerPrompt, reviewerUserInput(input)),
+        reviewerPromptRequest(reviewerPrompt, input),
         input,
         token,
         output,
@@ -392,7 +420,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
           logStep(output, `Round ${nextAction.round}: Examiner を ${modelNameForStorage(models.examiner)} で実行します`)
           const examinerRaw = await callLanguageModel(
             models.examiner,
-            buildPrompt(examinerPrompt, examinerUserInput(input, messages)),
+            discussionPromptRequest(examinerPrompt, input, messages),
             input,
             token,
             output,
@@ -423,7 +451,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         logStep(output, `Round ${nextAction.round}: Rebuttal を ${modelNameForStorage(models.rebuttal)} で実行します`)
         const rebuttalRaw = await callLanguageModel(
           models.rebuttal,
-          buildPrompt(rebuttalPrompt, rebuttalUserInput(input, messages)),
+          discussionPromptRequest(rebuttalPrompt, input, messages),
           input,
           token,
           output,
@@ -461,7 +489,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       logStep(output, 'Conclusion: 最終的にバグと判定された指摘だけを抽出します')
       const conclusionRaw = await callLanguageModel(
         models.examiner,
-        buildPrompt(conclusionSystemPrompt(), conclusionUserInput(input, messages, nextAction.final_judgment)),
+        conclusionPromptRequest(conclusionSystemPrompt(), input, messages, nextAction.final_judgment),
         input,
         token,
         output,
@@ -1798,16 +1826,93 @@ function buildPrompt(systemPrompt: string, userPrompt: string): string {
   return `${systemPrompt.trim()}\n\n---\n\n${userPrompt.trim()}`
 }
 
+function buildPromptCandidate(
+  systemPrompt: string,
+  userPrompt: string,
+  mode: PromptMode,
+  breakdown: InputSizeBreakdownItem[],
+  findingIds: string[] = [],
+): PromptCandidate {
+  return {
+    mode,
+    text: buildPrompt(systemPrompt, userPrompt),
+    breakdown,
+    findingIds,
+  }
+}
+
+function reviewerPromptRequest(systemPrompt: string, input: RunInput): PromptRequest {
+  return {
+    full: buildPromptCandidate(
+      systemPrompt,
+      reviewerUserInput(input),
+      'full',
+      reviewerPromptBreakdown(systemPrompt, input),
+    ),
+  }
+}
+
+function discussionPromptRequest(
+  systemPrompt: string,
+  input: RunInput,
+  messages: DiscussionMessageRecord[],
+): PromptRequest {
+  const findingIds = extractFindingIdsFromReviewer(messages)
+  const fullDiscussion = formatMessages(messages)
+  const compactDiscussion = formatCompactMessages(messages, findingIds)
+
+  return {
+    full: buildPromptCandidate(
+      systemPrompt,
+      discussionUserInput(input, fullDiscussion),
+      'full',
+      discussionPromptBreakdown(systemPrompt, input, fullDiscussion, 'discussion'),
+      findingIds,
+    ),
+    compact: buildPromptCandidate(
+      systemPrompt,
+      discussionUserInput(input, compactDiscussion),
+      'compact',
+      discussionPromptBreakdown(systemPrompt, input, compactDiscussion, 'compacted discussion'),
+      findingIds,
+    ),
+  }
+}
+
+function conclusionPromptRequest(
+  systemPrompt: string,
+  input: RunInput,
+  messages: DiscussionMessageRecord[],
+  finalJudgment: FinalJudgment,
+): PromptRequest {
+  const findingIds = extractFindingIdsFromReviewer(messages)
+  const fullDiscussion = formatMessages(messages)
+  const compactDiscussion = formatCompactMessages(messages, findingIds)
+
+  return {
+    full: buildPromptCandidate(
+      systemPrompt,
+      conclusionUserInputWithDiscussion(input, fullDiscussion, finalJudgment),
+      'full',
+      conclusionPromptBreakdown(systemPrompt, input, fullDiscussion, finalJudgment, 'discussion'),
+      findingIds,
+    ),
+    compact: buildPromptCandidate(
+      systemPrompt,
+      conclusionUserInputWithDiscussion(input, compactDiscussion, finalJudgment),
+      'compact',
+      conclusionPromptBreakdown(systemPrompt, input, compactDiscussion, finalJudgment, 'compacted discussion'),
+      findingIds,
+    ),
+  }
+}
+
 function reviewerUserInput(input: RunInput): string {
   return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\nリポジトリ:\n${input.repositoryRoot}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
-function examinerUserInput(input: RunInput, messages: DiscussionMessageRecord[]): string {
-  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
-}
-
-function rebuttalUserInput(input: RunInput, messages: DiscussionMessageRecord[]): string {
-  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${formatMessages(messages)}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+function discussionUserInput(input: RunInput, discussion: string): string {
+  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${discussion}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
 }
 
 function conclusionSystemPrompt(): string {
@@ -1866,6 +1971,10 @@ function conclusionUserInput(
   messages: DiscussionMessageRecord[],
   finalJudgment: FinalJudgment,
 ): string {
+  return conclusionUserInputWithDiscussion(input, formatMessages(messages), finalJudgment)
+}
+
+function conclusionUserInputWithDiscussion(input: RunInput, discussion: string, finalJudgment: FinalJudgment): string {
   return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}
 
 対象 review_id:
@@ -1876,7 +1985,7 @@ ${input.sessionId ?? 'unknown'}
 ${finalJudgment}
 
 これまでの会話:
-${formatMessages(messages)}`
+${discussion}`
 }
 
 function formatReviewRequirements(input: RunInput): string {
@@ -1900,25 +2009,190 @@ function formatCodeContext(input: RunInput): string {
 }
 
 function formatMessages(messages: DiscussionMessageRecord[]): string {
-  return messages
-    .map(message => {
-      const judgment = message.judgment ? ` judgment=${message.judgment}` : ''
-      return `Round ${message.round} ${message.agent} model=${message.model_name ?? 'Unknown'}${judgment}\n${message.content}`
-    })
-    .join('\n\n---\n\n')
+  return messages.map(formatDiscussionMessage).join('\n\n---\n\n')
+}
+
+function formatCompactMessages(messages: DiscussionMessageRecord[], findingIds: string[]): string {
+  const reviewerIndex = messages.findIndex(message => message.agent === 'REVIEWER')
+  const latestIndex = messages.length - 1
+  const manifest = [
+    '入力サイズ制御:',
+    '- token 上限が近い場合、この会話セクションでは古いラウンドを機械抽出要約に圧縮しています。',
+    '- Round 1 REVIEWER の元指摘と直近メッセージは全文です。',
+    '- 要約済み部分に判断に必要な根拠が不足している場合は、断定せず「根拠不足」として扱ってください。',
+    '',
+    '指摘 ID 台帳:',
+    findingIds.length > 0
+      ? findingIds.map(findingId => `- ${findingId}`).join('\n')
+      : '- （検出できた指摘 ID はありません）',
+    '',
+    '会話:',
+  ].join('\n')
+
+  const compactedMessages = messages.map((message, index) => {
+    if (index === reviewerIndex || index === latestIndex) {
+      return formatDiscussionMessage(message)
+    }
+    return formatCompactDiscussionMessage(message)
+  })
+
+  return [manifest, ...compactedMessages].join('\n\n---\n\n')
+}
+
+function formatDiscussionMessage(message: DiscussionMessageRecord): string {
+  const judgment = message.judgment ? ` judgment=${message.judgment}` : ''
+  return `Round ${message.round} ${message.agent} model=${message.model_name ?? 'Unknown'}${judgment}\n${message.content}`
+}
+
+function formatCompactDiscussionMessage(message: DiscussionMessageRecord): string {
+  const judgment = message.judgment ? ` judgment=${message.judgment}` : ''
+  return `Round ${message.round} ${message.agent} model=${message.model_name ?? 'Unknown'}${judgment}\n[機械抽出要約: 古いラウンドのため全文ではありません]\n${summarizeDiscussionContent(message.content)}`
+}
+
+function summarizeDiscussionContent(content: string): string {
+  const sections = extractFindingSections(content)
+  if (sections.length > 0) {
+    return truncateText(
+      sections.map(section => truncateText(section, compactFindingSectionMaxChars)).join('\n\n'),
+      compactMessageMaxChars,
+    )
+  }
+
+  const importantLines = content
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(isImportantDiscussionLine)
+
+  if (importantLines.length > 0) {
+    return truncateText(importantLines.join('\n'), compactMessageMaxChars)
+  }
+
+  return truncateText(content.trim(), compactMessageMaxChars)
+}
+
+function extractFindingSections(content: string): string[] {
+  const sections: string[] = []
+  const lines = content.split(/\r?\n/)
+  let current: string[] | null = null
+
+  for (const line of lines) {
+    if (/^#{1,6}\s+[HML]\d+\b/.test(line.trim())) {
+      if (current && current.length > 0) {
+        sections.push(current.join('\n').trim())
+      }
+      current = [line]
+      continue
+    }
+
+    if (current) {
+      current.push(line)
+    }
+  }
+
+  if (current && current.length > 0) {
+    sections.push(current.join('\n').trim())
+  }
+
+  return sections.filter(Boolean)
+}
+
+function isImportantDiscussionLine(line: string): boolean {
+  return (
+    /^#{1,6}\s+/.test(line) ||
+    /\b[HML]\d+\b/.test(line) ||
+    /^[-*]\s*(重大度|判定|対象|結論|問題|根拠|理由|発生条件|再現条件|影響|修正方針|反論|受け入れ|前提|根拠グレード|反証可能性|重大度妥当性|最小修正|reviewer の見解|examiner の指摘)\s*[:：]/i.test(
+      line,
+    )
+  )
+}
+
+function truncateText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value.trim()
+  }
+  const omitted = value.length - maxChars
+  return `${value.slice(0, maxChars).trimEnd()}\n...[truncated ${formatCount(omitted)} chars]`
+}
+
+function extractFindingIdsFromReviewer(messages: DiscussionMessageRecord[]): string[] {
+  const reviewer = messages.find(message => message.agent === 'REVIEWER')
+  return extractFindingIds(reviewer?.content ?? formatMessages(messages))
+}
+
+function extractFindingIds(text: string): string[] {
+  const findingIds = new Set<string>()
+  const regex = /\b([HML]\d+)\b/g
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    findingIds.add(match[1])
+  }
+  return [...findingIds]
+}
+
+function reviewerPromptBreakdown(systemPrompt: string, input: RunInput): InputSizeBreakdownItem[] {
+  return [
+    ...commonPromptBreakdown(systemPrompt, input),
+    { label: 'repository path', chars: input.repositoryRoot.length },
+    { label: 'diff patch', chars: input.diffPatch.length },
+    { label: 'code context', chars: input.codeContext?.length ?? 0 },
+  ]
+}
+
+function discussionPromptBreakdown(
+  systemPrompt: string,
+  input: RunInput,
+  discussion: string,
+  discussionLabel: string,
+): InputSizeBreakdownItem[] {
+  return [
+    ...commonPromptBreakdown(systemPrompt, input),
+    { label: 'review/session ids', chars: `${input.reviewId ?? 'unknown'}${input.sessionId ?? 'unknown'}`.length },
+    { label: discussionLabel, chars: discussion.length },
+    { label: 'diff patch', chars: input.diffPatch.length },
+    { label: 'code context', chars: input.codeContext?.length ?? 0 },
+  ]
+}
+
+function conclusionPromptBreakdown(
+  systemPrompt: string,
+  input: RunInput,
+  discussion: string,
+  finalJudgment: FinalJudgment,
+  discussionLabel: string,
+): InputSizeBreakdownItem[] {
+  return [
+    ...commonPromptBreakdown(systemPrompt, input),
+    {
+      label: 'review/session/final judgment',
+      chars: `${input.reviewId ?? 'unknown'}${input.sessionId ?? 'unknown'}${finalJudgment}`.length,
+    },
+    { label: discussionLabel, chars: discussion.length },
+  ]
+}
+
+function commonPromptBreakdown(systemPrompt: string, input: RunInput): InputSizeBreakdownItem[] {
+  return [
+    { label: 'system prompt', chars: systemPrompt.length },
+    { label: 'review requirements', chars: formatReviewRequirements(input).length },
+    { label: 'attachment summary', chars: formatAttachmentSummary(input).length },
+  ]
 }
 
 async function callLanguageModel(
   model: vscode.LanguageModelChat,
-  prompt: string,
+  promptRequest: PromptRequest,
   input: RunInput,
   token: vscode.CancellationToken,
   output: vscode.OutputChannel,
   label: string,
 ): Promise<string> {
   const startedAt = Date.now()
-  logProgress(output, `${label}: Language Model API に送信します (${formatCount(prompt.length)} chars prompt)`)
-  const messageContent = buildMessageContent(model, prompt, input)
+  const preparedInput = await prepareLanguageModelInput(model, promptRequest, input, token, output, label)
+  logProgress(
+    output,
+    `${label}: Language Model API に送信します (${formatCount(preparedInput.text.length)} chars prompt, ${formatCount(preparedInput.tokenCount)}/${formatCount(model.maxInputTokens)} input tokens, ${preparedInput.mode})`,
+  )
 
   let response: vscode.LanguageModelChatResponse
   const requestHeartbeat = setInterval(() => {
@@ -1927,7 +2201,7 @@ async function callLanguageModel(
 
   try {
     response = await model.sendRequest(
-      [vscode.LanguageModelChatMessage.User(messageContent)],
+      [preparedInput.message],
       {
         justification: 'ARGOS 自動レビューで reviewer / examiner / rebuttal を実行するために利用します。',
       },
@@ -1962,6 +2236,127 @@ async function callLanguageModel(
 
   logProgress(output, `${label}: 応答受信完了 ${formatCount(text.length)} chars (${formatElapsed(startedAt)})`)
   return text
+}
+
+async function prepareLanguageModelInput(
+  model: vscode.LanguageModelChat,
+  promptRequest: PromptRequest,
+  input: RunInput,
+  token: vscode.CancellationToken,
+  output: vscode.OutputChannel,
+  label: string,
+): Promise<MeasuredPromptCandidate> {
+  const full = await measurePromptCandidate(model, promptRequest.full, input, token)
+  logPromptMeasurement(output, label, full, model)
+
+  const shouldCompact = Boolean(promptRequest.compact) && full.tokenCount >= compactionThresholdTokens(model)
+  if (shouldCompact && promptRequest.compact) {
+    const missingFindingIds = missingFindingIdsAfterCompaction(promptRequest.full, promptRequest.compact)
+    if (missingFindingIds.length > 0) {
+      throw new Error(
+        `${label}: compact 入力の完全性チェックに失敗しました。次の指摘 ID が compact 入力に残っていません: ${missingFindingIds.join(', ')}`,
+      )
+    }
+
+    logProgress(output, `${label}: 入力が token 上限に近いため compact 入力へ切り替えます`)
+    const compact = await measurePromptCandidate(model, promptRequest.compact, input, token)
+    logPromptMeasurement(output, label, compact, model)
+    if (compact.tokenCount >= full.tokenCount) {
+      logProgress(output, `${label}: compact 入力で token 数が減らなかったため full 入力を維持します`)
+    } else if (compact.tokenCount > model.maxInputTokens) {
+      throw buildPromptTooLargeError(label, compact, input, model)
+    } else {
+      return compact
+    }
+
+    if (full.tokenCount > model.maxInputTokens) {
+      throw buildPromptTooLargeError(label, full, input, model)
+    }
+    return full
+  }
+
+  if (full.tokenCount > model.maxInputTokens) {
+    throw buildPromptTooLargeError(label, full, input, model)
+  }
+
+  if (full.tokenCount >= warningThresholdTokens(model)) {
+    logProgress(
+      output,
+      `${label}: 入力が token 上限に近づいています (${formatCount(full.tokenCount)}/${formatCount(model.maxInputTokens)} tokens)`,
+    )
+  }
+
+  return full
+}
+
+async function measurePromptCandidate(
+  model: vscode.LanguageModelChat,
+  candidate: PromptCandidate,
+  input: RunInput,
+  token: vscode.CancellationToken,
+): Promise<MeasuredPromptCandidate> {
+  const message = vscode.LanguageModelChatMessage.User(buildMessageContent(model, candidate.text, input))
+  const tokenCount = await model.countTokens(message, token)
+  return { ...candidate, message, tokenCount }
+}
+
+function compactionThresholdTokens(model: vscode.LanguageModelChat): number {
+  return Math.max(1, Math.floor(model.maxInputTokens * inputCompactionThresholdRatio))
+}
+
+function warningThresholdTokens(model: vscode.LanguageModelChat): number {
+  return Math.max(1, Math.floor(model.maxInputTokens * inputWarningThresholdRatio))
+}
+
+function missingFindingIdsAfterCompaction(full: PromptCandidate, compact: PromptCandidate): string[] {
+  if (full.findingIds.length === 0) {
+    return []
+  }
+
+  const compactFindingIds = new Set(extractFindingIds(compact.text))
+  return full.findingIds.filter(findingId => !compactFindingIds.has(findingId))
+}
+
+function logPromptMeasurement(
+  output: vscode.OutputChannel,
+  label: string,
+  candidate: MeasuredPromptCandidate,
+  model: vscode.LanguageModelChat,
+): void {
+  logProgress(
+    output,
+    `${label}: ${candidate.mode} 入力サイズ ${formatCount(candidate.text.length)} chars, ${formatCount(candidate.tokenCount)}/${formatCount(model.maxInputTokens)} input tokens`,
+  )
+}
+
+function buildPromptTooLargeError(
+  label: string,
+  candidate: MeasuredPromptCandidate,
+  input: RunInput,
+  model: vscode.LanguageModelChat,
+): Error {
+  const breakdown = formatInputBreakdown([...candidate.breakdown, ...attachmentContentBreakdown(input)])
+  return new Error(
+    `${label}: 入力が選択モデルの上限を超えたため送信を停止しました (${formatCount(candidate.tokenCount)}/${formatCount(model.maxInputTokens)} input tokens, ${candidate.mode})。大きい入力要素: ${breakdown}`,
+  )
+}
+
+function attachmentContentBreakdown(input: RunInput): InputSizeBreakdownItem[] {
+  return input.attachments
+    .filter((attachment): attachment is ReviewAttachment & { content: string } => attachment.kind === 'text')
+    .map(attachment => ({ label: `text attachment: ${attachment.name}`, chars: attachment.content.length }))
+}
+
+function formatInputBreakdown(items: InputSizeBreakdownItem[]): string {
+  const nonEmptyItems = items.filter(item => item.chars > 0).sort((left, right) => right.chars - left.chars)
+  if (nonEmptyItems.length === 0) {
+    return 'なし'
+  }
+
+  return nonEmptyItems
+    .slice(0, 8)
+    .map(item => `${item.label} ${formatCount(item.chars)} chars`)
+    .join(', ')
 }
 
 function buildMessageContent(

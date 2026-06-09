@@ -65,6 +65,7 @@ extension から渡される入力には、レビュー観点・要件、対象 
 ## 出力
 
 必ず ARGOS_JSON_START と ARGOS_JSON_END の間に JSON だけを 1 個入れて返してください。Markdown フェンスや説明文は付けないでください。
+content_lines の各文字列内にダブルクォート（"）を含める場合は、HTML 属性やコード例も含めて必ず \" として JSON エスケープしてください。
 
 ARGOS_JSON_START
 {"content_lines":["Markdown の反論本文 1 行目","Markdown の反論本文 2 行目"]}

@@ -83,6 +83,18 @@ interface JsonParseContext {
   output: vscode.OutputChannel
 }
 
+type JsonParseAttempt = 'full' | 'quote-repair' | 'brace-slice' | 'brace-slice-quote-repair'
+
+type JsonContainerContext =
+  | { kind: 'object'; expect: 'key' | 'colon' | 'value' | 'separator' }
+  | { kind: 'array'; expect: 'value' | 'separator' }
+
+interface JsonParseCandidate {
+  payload: string
+  attempt: JsonParseAttempt
+  sliceAttempt: JsonParseAttempt
+}
+
 interface RunInput {
   purpose: string
   repositoryRoot: string
@@ -2188,6 +2200,7 @@ reviewer / consolidator / examiner / rebuttal の議論から、人間が最終�
 ## 出力
 
 必ず ARGOS_JSON_START と ARGOS_JSON_END の間に JSON だけを 1 個入れて返してください。Markdown フェンスや説明文は付けないでください。
+content_lines の各文字列内にダブルクォート（"）を含める場合は、HTML 属性やコード例も含めて必ずバックスラッシュで JSON エスケープしてください。
 Markdown 本文は日本語で書いてください。見出し、箇条書き、ラベルも日本語にしてください。
 
 ARGOS_JSON_START
@@ -2721,6 +2734,18 @@ function sanitizeJsonEscapes(text: string): string {
   return sanitized
 }
 
+function buildJsonParseCandidates(text: string): JsonParseCandidate[] {
+  const sanitized = sanitizeJsonEscapes(text)
+  const repaired = sanitizeJsonEscapes(repairUnescapedJsonStringQuotes(text))
+  const candidates: JsonParseCandidate[] = [{ payload: sanitized, attempt: 'full', sliceAttempt: 'brace-slice' }]
+
+  if (repaired !== sanitized) {
+    candidates.push({ payload: repaired, attempt: 'quote-repair', sliceAttempt: 'brace-slice-quote-repair' })
+  }
+
+  return candidates
+}
+
 function isSimpleJsonEscape(value: string): boolean {
   return (
     value === '"' ||
@@ -2742,30 +2767,276 @@ function isJsonUnicodeEscape(text: string, start: number): boolean {
 function parseJsonObject<T>(text: string, validate: (value: unknown) => T, context: JsonParseContext): T {
   const extracted = extractArgosJson(text)
   const stripped = stripJsonFence(extracted)
-  const sanitized = sanitizeJsonEscapes(stripped)
-  try {
-    return validate(JSON.parse(sanitized))
-  } catch (error) {
-    logJsonParseFailure(context, sanitized, error)
-    const start = sanitized.indexOf('{')
-    const end = sanitized.lastIndexOf('}')
+  const candidates = buildJsonParseCandidates(stripped)
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = validate(JSON.parse(candidate.payload))
+      if (candidate.attempt === 'quote-repair') {
+        logArtifact(context.output, `${context.label} JSON parse recovered (${candidate.attempt})`)
+      }
+      return parsed
+    } catch (error) {
+      logJsonParseFailure(context, candidate.payload, error, candidate.attempt)
+    }
+  }
+
+  for (const candidate of candidates) {
+    const start = candidate.payload.indexOf('{')
+    const end = candidate.payload.lastIndexOf('}')
     if (start >= 0 && end > start) {
-      const candidate = sanitized.slice(start, end + 1)
+      const payload = candidate.payload.slice(start, end + 1)
       try {
-        return validate(JSON.parse(candidate))
+        const parsed = validate(JSON.parse(payload))
+        if (candidate.sliceAttempt === 'brace-slice-quote-repair') {
+          logArtifact(context.output, `${context.label} JSON parse recovered (${candidate.sliceAttempt})`)
+        }
+        return parsed
       } catch (nestedError) {
-        logJsonParseFailure(context, candidate, nestedError, 'brace-slice')
+        logJsonParseFailure(context, payload, nestedError, candidate.sliceAttempt)
       }
     }
-    throw new Error(`モデル応答が JSON として解釈できませんでした: ${stripped.slice(0, 300)}`)
   }
+
+  throw new Error(`モデル応答が JSON として解釈できませんでした: ${stripped.slice(0, 300)}`)
+}
+
+function repairUnescapedJsonStringQuotes(text: string): string {
+  let repaired = ''
+  let inString = false
+  let currentStringKind: 'key' | 'value' = 'value'
+  const stack: JsonContainerContext[] = []
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+
+    if (!inString) {
+      repaired += char
+      if (isJsonWhitespace(char)) {
+        continue
+      }
+
+      if (char === '{') {
+        stack.push({ kind: 'object', expect: 'key' })
+        continue
+      }
+
+      if (char === '[') {
+        stack.push({ kind: 'array', expect: 'value' })
+        continue
+      }
+
+      if (char === '}') {
+        stack.pop()
+        markJsonValueComplete(stack)
+        continue
+      }
+
+      if (char === ']') {
+        stack.pop()
+        markJsonValueComplete(stack)
+        continue
+      }
+
+      if (char === ':') {
+        const top = stack.at(-1)
+        if (top?.kind === 'object') {
+          top.expect = 'value'
+        }
+        continue
+      }
+
+      if (char === ',') {
+        const top = stack.at(-1)
+        if (top?.kind === 'object') {
+          top.expect = 'key'
+        } else if (top?.kind === 'array') {
+          top.expect = 'value'
+        }
+        continue
+      }
+
+      if (char === '"') {
+        currentStringKind = isExpectingJsonObjectKey(stack) ? 'key' : 'value'
+        inString = true
+      }
+      continue
+    }
+
+    if (char === '\\') {
+      repaired += char
+      if (index + 1 < text.length) {
+        repaired += text[index + 1]
+        index += 1
+      }
+      continue
+    }
+
+    if (char === '\n') {
+      repaired += '\\n'
+      continue
+    }
+
+    if (char === '\r') {
+      repaired += '\\r'
+      continue
+    }
+
+    if (char === '\t') {
+      repaired += '\\t'
+      continue
+    }
+
+    if (char !== '"') {
+      repaired += char
+      continue
+    }
+
+    if (isLikelyJsonStringTerminator(text, index, currentStringKind, stack)) {
+      repaired += char
+      inString = false
+      if (currentStringKind === 'key') {
+        const top = stack.at(-1)
+        if (top?.kind === 'object') {
+          top.expect = 'colon'
+        }
+      } else {
+        markJsonValueComplete(stack)
+      }
+      continue
+    }
+
+    repaired += '\\"'
+  }
+
+  return repaired
+}
+
+function isExpectingJsonObjectKey(stack: JsonContainerContext[]): boolean {
+  const top = stack.at(-1)
+  return top?.kind === 'object' && top.expect === 'key'
+}
+
+function markJsonValueComplete(stack: JsonContainerContext[]): void {
+  const top = stack.at(-1)
+  if (top?.kind === 'object' && top.expect === 'value') {
+    top.expect = 'separator'
+  } else if (top?.kind === 'array' && top.expect === 'value') {
+    top.expect = 'separator'
+  }
+}
+
+function isLikelyJsonStringTerminator(
+  text: string,
+  quoteIndex: number,
+  stringKind: 'key' | 'value',
+  stack: JsonContainerContext[],
+): boolean {
+  const nextIndex = findNextNonJsonWhitespace(text, quoteIndex + 1)
+  if (nextIndex === -1) {
+    return true
+  }
+
+  const next = text[nextIndex]
+  if (stringKind === 'key') {
+    return next === ':'
+  }
+
+  if (next === ',') {
+    return isLikelyJsonCommaAfterString(text, nextIndex, stack)
+  }
+
+  if (next === ']' || next === '}') {
+    return isLikelyJsonContainerEndAfterString(text, nextIndex, stack)
+  }
+
+  return false
+}
+
+function isLikelyJsonCommaAfterString(text: string, commaIndex: number, stack: JsonContainerContext[]): boolean {
+  const top = stack.at(-1)
+  const nextIndex = findNextNonJsonWhitespace(text, commaIndex + 1)
+  if (nextIndex === -1) {
+    return false
+  }
+
+  const next = text[nextIndex]
+  if (top?.kind === 'object') {
+    return next === '"' || next === '}'
+  }
+
+  if (top?.kind === 'array') {
+    return next === '"' || next === '{' || next === '[' || next === ']' || isJsonPrimitiveStart(text, nextIndex)
+  }
+
+  return next === '"' || next === '{' || next === '[' || isJsonPrimitiveStart(text, nextIndex)
+}
+
+function isLikelyJsonContainerEndAfterString(text: string, endIndex: number, stack: JsonContainerContext[]): boolean {
+  const simulatedStack = stack.slice()
+  let index = endIndex
+
+  while (index < text.length) {
+    index = skipJsonWhitespace(text, index)
+    const char = text[index]
+    if (char !== ']' && char !== '}') {
+      break
+    }
+
+    const top = simulatedStack.at(-1)
+    if ((char === ']' && top?.kind !== 'array') || (char === '}' && top?.kind !== 'object')) {
+      return false
+    }
+    simulatedStack.pop()
+    index += 1
+  }
+
+  index = skipJsonWhitespace(text, index)
+  if (index >= text.length) {
+    return true
+  }
+
+  const following = text[index]
+  return following === ',' || following === ']' || following === '}'
+}
+
+function isJsonPrimitiveStart(text: string, index: number): boolean {
+  const char = text[index]
+  return (
+    char === '-' ||
+    isJsonDigit(char) ||
+    text.startsWith('true', index) ||
+    text.startsWith('false', index) ||
+    text.startsWith('null', index)
+  )
+}
+
+function isJsonDigit(char: string): boolean {
+  return char >= '0' && char <= '9'
+}
+
+function findNextNonJsonWhitespace(text: string, start: number): number {
+  const index = skipJsonWhitespace(text, start)
+  return index < text.length ? index : -1
+}
+
+function skipJsonWhitespace(text: string, start: number): number {
+  let index = start
+  while (index < text.length && isJsonWhitespace(text[index])) {
+    index += 1
+  }
+  return index
+}
+
+function isJsonWhitespace(char: string): boolean {
+  return char === ' ' || char === '\n' || char === '\r' || char === '\t'
 }
 
 function logJsonParseFailure(
   context: JsonParseContext,
   payload: string,
   error: unknown,
-  attempt: 'full' | 'brace-slice' = 'full',
+  attempt: JsonParseAttempt = 'full',
 ): void {
   const message = formatError(error)
   const position = extractJsonErrorPosition(message)

@@ -378,7 +378,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
       logStep(output, `Rebuttal model: ${modelNameForStorage(models.rebuttal)}`)
 
       progress.report({ message: '変更差分を収集しています' })
-      const collected = await collectReviewInput(workspaceFolder.uri.fsPath, settings)
+      const collected = await collectReviewInput(workspaceFolder.uri.fsPath, settings, attachments)
       throwIfCancelled(token)
       logStep(output, `Git repository: ${collected.repositoryRoot}`)
       logStep(output, `Diff range: ${collected.diffRange}`)
@@ -1042,8 +1042,6 @@ function renderReviewFormHtml(input: {
     remove: labels.attachmentRemove,
     pastedImageName: labels.attachmentPastedImageName,
   })
-  const acceptedAttachmentTypes = [...textExtensions, ...imageExtensions()].join(',')
-  const textExtensionsJson = jsonForInlineScript([...textExtensions])
   const imageExtensionsJson = jsonForInlineScript(imageExtensions())
 
   return `<!DOCTYPE html>
@@ -1356,7 +1354,7 @@ function renderReviewFormHtml(input: {
           <div class="attachment-count">${escapeHtml(labels.attachmentCountHint)}</div>
           <div class="attachment-controls">
             <button id="attachment-file-button" type="button">${escapeHtml(labels.attachmentButton)}</button>
-            <input id="attachment-file-input" class="visually-hidden-file-input" type="file" multiple accept="${escapeAttribute(acceptedAttachmentTypes)}">
+            <input id="attachment-file-input" class="visually-hidden-file-input" type="file" multiple>
           </div>
           <div id="attachment-status" class="attachment-status" aria-live="polite"></div>
           <div id="attachment-list" class="attachment-list"></div>
@@ -1388,7 +1386,6 @@ function renderReviewFormHtml(input: {
     const attachmentList = document.getElementById('attachment-list');
     const attachmentState = [];
     const attachmentLabels = ${attachmentLabelsJson};
-    const supportedTextExtensions = new Set(${textExtensionsJson});
     const supportedImageExtensions = new Set(${imageExtensionsJson});
 
     function setAttachmentStatus(message, isError = false) {
@@ -1493,10 +1490,7 @@ function renderReviewFormHtml(input: {
         return createImageAttachmentFromFile(file);
       }
 
-      if (!supportedTextExtensions.has(extension)) {
-        return undefined;
-      }
-
+      // 画像以外は拡張子を問わずテキスト添付として扱う（.patch / .diff / 拡張子なしも許可）。
       return {
         id: 'text:' + file.name + ':' + file.size + ':' + file.lastModified,
         kind: 'text',
@@ -1822,13 +1816,16 @@ async function readPromptAsset(context: vscode.ExtensionContext, fileName: strin
 async function collectReviewInput(
   workspaceRoot: string,
   settings: ExtensionSettings,
+  attachments: ReviewAttachment[],
 ): Promise<{ repositoryRoot: string; diffRange: string; diffPatch: string; codeContext?: string }> {
   const repositoryRoot = await resolveRepositoryRoot(workspaceRoot)
   const baseBranch = await inferReviewBaseBranch(repositoryRoot)
   const diffSource = await resolveReviewDiffSource(repositoryRoot, baseBranch, settings.includeUncommittedChanges)
   const diffPatch = await readReviewDiff(repositoryRoot, diffSource)
 
-  if (!diffPatch.trim()) {
+  // テキスト添付（差分ファイルなど）がある場合は、Git 作業差分が空でもそれをレビュー対象として続行する。
+  const hasTextAttachments = attachments.some(attachment => attachment.kind === 'text')
+  if (!diffPatch.trim() && !hasTextAttachments) {
     throw new Error(`レビュー対象の Git 変更差分が見つかりませんでした (${diffSource.label})`)
   }
 

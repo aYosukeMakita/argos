@@ -2,7 +2,7 @@
   "name": "argos-vscode-extension",
   "displayName": "ARGOS Auto Review",
   "description": "Run ARGOS auto review with VS Code Copilot language models.",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "private": true,
   "publisher": "argos",
   "files": [
@@ -51,6 +51,11 @@
           "type": "boolean",
           "default": true,
           "description": "Generate a .github/prompts/*.prompt.md file for asking Copilot follow-up questions about each completed ARGOS review."
+        },
+        "argos.debugModelIO": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write Language Model prompts, raw responses, parsed JSON, and parse errors to .argos/debug for troubleshooting. Logs may contain repository content and attachments."
         },
         "argos.includeUncommittedChanges": {
           "type": "boolean",

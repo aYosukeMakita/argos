@@ -14,6 +14,7 @@ interface ExtensionSettings {
   includeContext: boolean
   contextBudget: number
   generatePromptFile: boolean
+  debugModelIO: boolean
   includeUncommittedChanges: boolean
   activePreset: string
   presets: Record<string, ModelPreset>
@@ -84,6 +85,8 @@ interface JsonParseContext {
   output: vscode.OutputChannel
 }
 
+type LanguageModelResponseParser<T> = (text: string, context: JsonParseContext) => T
+
 type JsonParseAttempt = 'full' | 'quote-repair' | 'brace-slice' | 'brace-slice-quote-repair'
 
 type JsonContainerContext =
@@ -94,6 +97,49 @@ interface JsonParseCandidate {
   payload: string
   attempt: JsonParseAttempt
   sliceAttempt: JsonParseAttempt
+}
+
+type ModelDebugAttemptStatus = 'raw' | 'parsed' | 'parse-error' | 'request-error'
+
+interface ModelDebugToolCall {
+  round: number
+  name: string
+  input: unknown
+  resultText: string
+}
+
+interface ModelDebugAttemptRecord {
+  label: string
+  attempt: number
+  maxAttempts: number
+  modelName: string
+  promptMode: string
+  tokenCount: number
+  maxInputTokens: number
+  promptText: string
+  responseText: string
+  toolCallCount: number
+  toolCalls: ModelDebugToolCall[]
+  status: ModelDebugAttemptStatus
+  parsed?: unknown
+  parseError?: string
+}
+
+interface ModelDebugManifestEntry {
+  label: string
+  attempt: number
+  max_attempts: number
+  model: string
+  status: ModelDebugAttemptStatus
+  prompt_mode: string
+  prompt_chars: number
+  response_chars: number
+  input_tokens: number
+  max_input_tokens: number
+  tool_call_count: number
+  created_at: string
+  files: Record<string, string>
+  parse_error?: string
 }
 
 interface RunInput {
@@ -272,6 +318,118 @@ const inputCompactionThresholdRatio = 0.85
 const inputWarningThresholdRatio = 0.8
 const compactMessageMaxChars = 8_000
 const compactFindingSectionMaxChars = 1_600
+const jsonRetryInstruction = `
+
+---
+
+重要: 直前の応答は ARGOS が要求する JSON 形式ではありませんでした。必要な追加確認がある場合は、説明文ではなく提供されたツール呼び出しとして実行してください。最終応答は必ず ARGOS_JSON_START と ARGOS_JSON_END の間に JSON オブジェクトだけを 1 個入れ、Markdown フェンスや前置き、後書きは付けないでください。`.trim()
+
+class ModelDebugLogger {
+  private readonly entries: ModelDebugManifestEntry[] = []
+  private writeQueue: Promise<void> = Promise.resolve()
+
+  constructor(
+    readonly rootUri: vscode.Uri,
+    readonly manifestUri: vscode.Uri,
+    private readonly output: vscode.OutputChannel,
+    private readonly manifestBase: Record<string, unknown>,
+  ) {}
+
+  async initialize(): Promise<void> {
+    await vscode.workspace.fs.createDirectory(this.rootUri)
+    await this.writeManifest()
+  }
+
+  recordAttempt(record: ModelDebugAttemptRecord): Promise<void> {
+    this.writeQueue = this.writeQueue
+      .then(() => this.writeAttempt(record))
+      .catch(error => {
+        logArtifact(this.output, `Debug log write failed: ${formatError(error)}`)
+      })
+    return this.writeQueue
+  }
+
+  async flush(): Promise<void> {
+    await this.writeQueue
+  }
+
+  private async writeAttempt(record: ModelDebugAttemptRecord): Promise<void> {
+    const createdAt = new Date().toISOString()
+    const directoryName = sanitizeDebugPathSegment(record.label)
+    const attemptName = `attempt-${record.attempt}`
+    const directoryUri = vscode.Uri.joinPath(this.rootUri, directoryName)
+    await vscode.workspace.fs.createDirectory(directoryUri)
+
+    const files: Record<string, string> = {}
+    await this.writeDebugFile(directoryUri, `${attemptName}.prompt.md`, renderDebugPrompt(record), files, 'prompt')
+    await this.writeDebugFile(directoryUri, `${attemptName}.response.txt`, record.responseText, files, 'response')
+
+    if (record.toolCalls.length > 0) {
+      await this.writeDebugFile(
+        directoryUri,
+        `${attemptName}.tool-calls.json`,
+        stringifyDebugJson(record.toolCalls),
+        files,
+        'tool_calls',
+      )
+    }
+
+    if (record.status === 'parsed') {
+      await this.writeDebugFile(
+        directoryUri,
+        `${attemptName}.parsed.json`,
+        stringifyDebugJson(record.parsed ?? null),
+        files,
+        'parsed',
+      )
+    } else if (record.status === 'parse-error' || record.status === 'request-error') {
+      await this.writeDebugFile(
+        directoryUri,
+        record.status === 'request-error' ? `${attemptName}.request-error.txt` : `${attemptName}.parse-error.txt`,
+        `${record.parseError ?? 'Unknown parse error'}\n`,
+        files,
+        record.status === 'request-error' ? 'request_error' : 'parse_error',
+      )
+    }
+
+    this.entries.push({
+      label: record.label,
+      attempt: record.attempt,
+      max_attempts: record.maxAttempts,
+      model: record.modelName,
+      status: record.status,
+      prompt_mode: record.promptMode,
+      prompt_chars: record.promptText.length,
+      response_chars: record.responseText.length,
+      input_tokens: record.tokenCount,
+      max_input_tokens: record.maxInputTokens,
+      tool_call_count: record.toolCallCount,
+      created_at: createdAt,
+      files,
+      parse_error: record.parseError,
+    })
+    await this.writeManifest()
+  }
+
+  private async writeDebugFile(
+    directoryUri: vscode.Uri,
+    fileName: string,
+    content: string,
+    files: Record<string, string>,
+    key: string,
+  ): Promise<void> {
+    const fileUri = vscode.Uri.joinPath(directoryUri, fileName)
+    await vscode.workspace.fs.writeFile(fileUri, textEncoder.encode(content))
+    files[key] = `${path.basename(directoryUri.fsPath)}/${fileName}`
+  }
+
+  private async writeManifest(): Promise<void> {
+    await vscode.workspace.fs.writeFile(
+      this.manifestUri,
+      textEncoder.encode(stringifyDebugJson({ ...this.manifestBase, attempts: this.entries })),
+    )
+  }
+}
 
 class LanguageModelRetryExhaustedError extends Error {
   constructor(
@@ -454,6 +612,12 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         input.sessionId = sessionId
         const messages: DiscussionMessageRecord[] = []
         const createdAt = new Date().toISOString()
+        const debugLogger = settings.debugModelIO
+          ? await createModelDebugLogger(workspaceFolder.uri.fsPath, input, createdAt, output)
+          : undefined
+        if (debugLogger) {
+          logArtifact(output, `Debug log: ${debugLogger.manifestUri.fsPath}`)
+        }
 
         progress.report({
           message: models.reviewer2
@@ -466,7 +630,9 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
             ? `Reviewer 1/2 を並列実行します (${modelNameForStorage(models.reviewer)}, ${modelNameForStorage(models.reviewer2)})`
             : `Reviewer を ${modelNameForStorage(models.reviewer)} で実行します`,
         )
-        const reviewerTasks: Array<Promise<{ label: string; model: vscode.LanguageModelChat; raw: string }>> = [
+        const reviewerTasks: Array<
+          Promise<{ label: string; model: vscode.LanguageModelChat; parsed: ReviewerOutput }>
+        > = [
           callLanguageModel(
             models.reviewer,
             reviewerPromptRequest(reviewerPrompt, input),
@@ -474,7 +640,9 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
             token,
             output,
             'Reviewer 1',
-          ).then(raw => ({ label: 'Reviewer 1', model: models.reviewer, raw })),
+            parseReviewerJsonOutput,
+            debugLogger,
+          ).then(parsed => ({ label: 'Reviewer 1', model: models.reviewer, parsed })),
         ]
         if (models.reviewer2) {
           reviewerTasks.push(
@@ -485,16 +653,15 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
               token,
               output,
               'Reviewer 2',
-            ).then(raw => ({ label: 'Reviewer 2', model: models.reviewer2 as vscode.LanguageModelChat, raw })),
+              parseReviewerJsonOutput,
+              debugLogger,
+            ).then(parsed => ({ label: 'Reviewer 2', model: models.reviewer2 as vscode.LanguageModelChat, parsed })),
           )
         }
         const reviewerResults = await Promise.all(reviewerTasks)
         throwIfCancelled(token)
         for (const result of reviewerResults) {
-          const reviewer = parseJsonObject<ReviewerOutput>(result.raw, validateReviewerOutput, {
-            label: result.label,
-            output,
-          })
+          const reviewer = result.parsed
           messages.push({
             id: messages.length + 1,
             session_id: sessionId,
@@ -513,7 +680,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
           }
           progress.report({ message: `統合者を ${models.consolidator.name} で実行しています` })
           logStep(output, `統合者を ${modelNameForStorage(models.consolidator)} で実行します`)
-          const consolidatorRaw = await callLanguageModel(
+          const consolidated = await callLanguageModel(
             models.consolidator,
             consolidatorPromptRequest(
               consolidatorPrompt,
@@ -524,11 +691,9 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
             token,
             output,
             'Consolidator',
+            parseReviewerJsonOutput,
+            debugLogger,
           )
-          const consolidated = parseJsonObject<ReviewerOutput>(consolidatorRaw, validateReviewerOutput, {
-            label: 'Consolidator',
-            output,
-          })
           throwIfCancelled(token)
           messages.push({
             id: messages.length + 1,
@@ -563,18 +728,16 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
               output,
               `Round ${nextAction.round}: Examiner を ${modelNameForStorage(models.examiner)} で実行します`,
             )
-            const examinerRaw = await callLanguageModel(
+            const examiner = await callLanguageModel(
               models.examiner,
               discussionPromptRequest(examinerPrompt, input, messages),
               input,
               token,
               output,
               `Round ${nextAction.round} Examiner`,
+              parseExaminerJsonOutput,
+              debugLogger,
             )
-            const examiner = parseJsonObject<ExaminerOutput>(examinerRaw, validateExaminerOutput, {
-              label: `Round ${nextAction.round} Examiner`,
-              output,
-            })
             messages.push({
               id: messages.length + 1,
               session_id: sessionId,
@@ -594,18 +757,16 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
             message: `Round ${nextAction.round}: Rebuttal を ${models.rebuttal.name} で実行しています`,
           })
           logStep(output, `Round ${nextAction.round}: Rebuttal を ${modelNameForStorage(models.rebuttal)} で実行します`)
-          const rebuttalRaw = await callLanguageModel(
+          const rebuttal = await callLanguageModel(
             models.rebuttal,
             discussionPromptRequest(rebuttalPrompt, input, messages),
             input,
             token,
             output,
             `Round ${nextAction.round} Rebuttal`,
+            parseRebuttalJsonOutput,
+            debugLogger,
           )
-          const rebuttal = parseJsonObject<RebuttalOutput>(rebuttalRaw, validateRebuttalOutput, {
-            label: `Round ${nextAction.round} Rebuttal`,
-            output,
-          })
           messages.push({
             id: messages.length + 1,
             session_id: sessionId,
@@ -632,18 +793,16 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
 
         progress.report({ message: '最終的にバグと判定された指摘を抽出しています' })
         logStep(output, 'Conclusion: 最終的にバグと判定された指摘だけを抽出します')
-        const conclusionRaw = await callLanguageModel(
+        const conclusion = await callLanguageModel(
           models.examiner,
           conclusionPromptRequest(conclusionSystemPrompt(), input, messages, nextAction.final_judgment),
           input,
           token,
           output,
           'Conclusion',
+          parseConclusionJsonOutput,
+          debugLogger,
         )
-        const conclusion = parseJsonObject<ConclusionOutput>(conclusionRaw, validateConclusionOutput, {
-          label: 'Conclusion',
-          output,
-        })
         throwIfCancelled(token)
 
         const reportDraft: Omit<ReviewReport, 'markdownUri'> = {
@@ -682,6 +841,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         if (report.promptUri) {
           logArtifact(output, `Prompt file: ${report.promptUri.fsPath}`)
         }
+        await debugLogger?.flush()
         await openReviewPreview(context, report)
       },
     )
@@ -718,6 +878,7 @@ function readSettings(): ExtensionSettings {
     includeContext: config.get('includeContext', true),
     contextBudget: config.get('contextBudget', 220_000),
     generatePromptFile: config.get('generatePromptFile', true),
+    debugModelIO: config.get('debugModelIO', false),
     includeUncommittedChanges: config.get('includeUncommittedChanges', true),
     activePreset: config.get('activePreset', '').trim(),
     presets: normalizeModelPresets(config.get('presets', {})),
@@ -2565,7 +2726,27 @@ async function callLanguageModel(
   token: vscode.CancellationToken,
   output: vscode.OutputChannel,
   label: string,
-): Promise<string> {
+): Promise<string>
+async function callLanguageModel<T>(
+  model: vscode.LanguageModelChat,
+  promptRequest: PromptRequest,
+  input: RunInput,
+  token: vscode.CancellationToken,
+  output: vscode.OutputChannel,
+  label: string,
+  parseResponse: LanguageModelResponseParser<T>,
+  debugLogger?: ModelDebugLogger,
+): Promise<T>
+async function callLanguageModel<T>(
+  model: vscode.LanguageModelChat,
+  promptRequest: PromptRequest,
+  input: RunInput,
+  token: vscode.CancellationToken,
+  output: vscode.OutputChannel,
+  label: string,
+  parseResponse?: LanguageModelResponseParser<T>,
+  debugLogger?: ModelDebugLogger,
+): Promise<string | T> {
   const startedAt = Date.now()
   const preparedInput = await prepareLanguageModelInput(model, promptRequest, input, token, output, label)
   const tools = createLanguageModelTools(model)
@@ -2574,18 +2755,22 @@ async function callLanguageModel(
     .get<number>('languageModelRetryAttempts', 2)
   const maxAttempts = languageModelRetryAttempts + 1
   let lastError: unknown
+  let lastParseError: unknown
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const attemptLabel = maxAttempts > 1 ? `${label} (試行 ${attempt}/${maxAttempts})` : label
+    const attemptMessages = buildLanguageModelAttemptMessages(preparedInput, lastParseError)
+    const inputMode = lastParseError ? `${preparedInput.mode}, JSON retry reminder` : preparedInput.mode
+    const promptText = formatLanguageModelMessagesForDebug(attemptMessages)
     logProgress(
       output,
-      `${attemptLabel}: Language Model API に送信します (${formatCount(preparedInput.text.length)} chars prompt, ${formatCount(preparedInput.tokenCount)}/${formatCount(model.maxInputTokens)} input tokens, ${preparedInput.mode})`,
+      `${attemptLabel}: Language Model API に送信します (${formatCount(preparedInput.text.length)} chars prompt, ${formatCount(preparedInput.tokenCount)}/${formatCount(model.maxInputTokens)} input tokens, ${inputMode})`,
     )
 
     try {
       const result = await completeLanguageModelTurn(
         model,
-        [preparedInput.message],
+        attemptMessages,
         tools,
         {
           repositoryRoot: input.repositoryRoot,
@@ -2602,6 +2787,75 @@ async function callLanguageModel(
         output,
         `${attemptLabel}: 応答受信完了 ${formatCount(result.text.length)} chars (${formatElapsed(startedAt)})`,
       )
+
+      if (parseResponse) {
+        try {
+          const parsed = parseResponse(result.text, { label: attemptLabel, output })
+          await debugLogger?.recordAttempt({
+            label,
+            attempt,
+            maxAttempts,
+            modelName: modelNameForStorage(model),
+            promptMode: inputMode,
+            tokenCount: preparedInput.tokenCount,
+            maxInputTokens: model.maxInputTokens,
+            promptText,
+            responseText: result.text,
+            toolCallCount: result.toolCallCount,
+            toolCalls: result.toolCalls,
+            status: 'parsed',
+            parsed,
+          })
+          return parsed
+        } catch (error) {
+          if (token.isCancellationRequested) {
+            throw error
+          }
+
+          lastError = error
+          lastParseError = error
+          await debugLogger?.recordAttempt({
+            label,
+            attempt,
+            maxAttempts,
+            modelName: modelNameForStorage(model),
+            promptMode: inputMode,
+            tokenCount: preparedInput.tokenCount,
+            maxInputTokens: model.maxInputTokens,
+            promptText,
+            responseText: result.text,
+            toolCallCount: result.toolCallCount,
+            toolCalls: result.toolCalls,
+            status: 'parse-error',
+            parseError: formatError(error),
+          })
+          if (attempt < maxAttempts) {
+            logProgress(
+              output,
+              `${label}: Copilot 応答を JSON として解釈できませんでした (${formatError(error)})。${formatDuration(languageModelRetryDelayMs)} 後に出力形式を再指定してリトライします (${attempt}/${languageModelRetryAttempts})`,
+            )
+            await delay(languageModelRetryDelayMs, token)
+            continue
+          }
+
+          throw error
+        }
+      }
+
+      await debugLogger?.recordAttempt({
+        label,
+        attempt,
+        maxAttempts,
+        modelName: modelNameForStorage(model),
+        promptMode: inputMode,
+        tokenCount: preparedInput.tokenCount,
+        maxInputTokens: model.maxInputTokens,
+        promptText,
+        responseText: result.text,
+        toolCallCount: result.toolCallCount,
+        toolCalls: result.toolCalls,
+        status: 'raw',
+      })
       return result.text
     } catch (error) {
       if (token.isCancellationRequested) {
@@ -2609,6 +2863,23 @@ async function callLanguageModel(
       }
 
       lastError = error
+      if (error !== lastParseError) {
+        await debugLogger?.recordAttempt({
+          label,
+          attempt,
+          maxAttempts,
+          modelName: modelNameForStorage(model),
+          promptMode: inputMode,
+          tokenCount: preparedInput.tokenCount,
+          maxInputTokens: model.maxInputTokens,
+          promptText,
+          responseText: '',
+          toolCallCount: 0,
+          toolCalls: [],
+          status: 'request-error',
+          parseError: formatError(error),
+        })
+      }
       if (attempt < maxAttempts) {
         logProgress(
           output,
@@ -2621,6 +2892,27 @@ async function callLanguageModel(
   }
 
   throw new LanguageModelRetryExhaustedError(label, languageModelRetryAttempts, lastError)
+}
+
+function buildLanguageModelAttemptMessages(
+  preparedInput: MeasuredPromptCandidate,
+  lastParseError: unknown,
+): vscode.LanguageModelChatMessage[] {
+  if (!lastParseError) {
+    return [preparedInput.message]
+  }
+
+  return [
+    new vscode.LanguageModelChatMessage(
+      preparedInput.message.role,
+      [...preparedInput.message.content, new vscode.LanguageModelTextPart(formatJsonRetryInstruction(lastParseError))],
+      preparedInput.message.name,
+    ),
+  ]
+}
+
+function formatJsonRetryInstruction(error: unknown): string {
+  return `${jsonRetryInstruction}\nパースエラー: ${formatError(error)}`
 }
 
 function createLanguageModelTools(model: vscode.LanguageModelChat): ArgosLanguageModelToolDefinition[] {
@@ -2680,9 +2972,10 @@ async function completeLanguageModelTurn(
   toolContext: ArgosToolInvocationContext,
   token: vscode.CancellationToken,
   startedAt: number,
-): Promise<{ text: string; toolCallCount: number }> {
+): Promise<{ text: string; toolCallCount: number; toolCalls: ModelDebugToolCall[] }> {
   const messages = [...initialMessages]
   let toolCallCount = 0
+  const toolDebugEvents: ModelDebugToolCall[] = []
 
   for (let round = 0; round <= maxLanguageModelToolRounds; round += 1) {
     const response = await sendLanguageModelRequest(
@@ -2702,7 +2995,7 @@ async function completeLanguageModelTurn(
     )
 
     if (toolCalls.length === 0) {
-      return { text, toolCallCount }
+      return { text, toolCallCount, toolCalls: toolDebugEvents }
     }
 
     toolCallCount += toolCalls.length
@@ -2713,9 +3006,10 @@ async function completeLanguageModelTurn(
       )
     }
 
-    const toolResults = await invokeLanguageModelTools(toolCalls, tools, toolContext, token)
+    const { resultParts, debugEvents } = await invokeLanguageModelTools(toolCalls, tools, toolContext, token)
+    toolDebugEvents.push(...debugEvents.map(event => ({ ...event, round: round + 1 })))
     messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts))
-    messages.push(vscode.LanguageModelChatMessage.User(toolResults))
+    messages.push(vscode.LanguageModelChatMessage.User(resultParts))
   }
 
   throw new Error(`${toolContext.label}: ツール呼び出しループの継続上限に達しました`)
@@ -2814,9 +3108,13 @@ async function invokeLanguageModelTools(
   tools: readonly ArgosLanguageModelToolDefinition[],
   context: ArgosToolInvocationContext,
   token: vscode.CancellationToken,
-): Promise<vscode.LanguageModelToolResultPart[]> {
+): Promise<{
+  resultParts: vscode.LanguageModelToolResultPart[]
+  debugEvents: Array<Omit<ModelDebugToolCall, 'round'>>
+}> {
   const toolByName = new Map(tools.map(tool => [tool.tool.name, tool]))
   const results: vscode.LanguageModelToolResultPart[] = []
+  const debugEvents: Omit<ModelDebugToolCall, 'round'>[] = []
 
   for (const toolCall of toolCalls) {
     throwIfCancelled(token)
@@ -2837,10 +3135,16 @@ async function invokeLanguageModelTools(
       }
     }
 
-    results.push(new vscode.LanguageModelToolResultPart(toolCall.callId, clipToolResultContent(result.content)))
+    const clippedContent = clipToolResultContent(result.content)
+    results.push(new vscode.LanguageModelToolResultPart(toolCall.callId, clippedContent))
+    debugEvents.push({
+      name: toolCall.name,
+      input: toolCall.input,
+      resultText: formatToolResultContentForDebug(clippedContent),
+    })
   }
 
-  return results
+  return { resultParts: results, debugEvents }
 }
 
 async function readFileTool(
@@ -3312,6 +3616,22 @@ function parseJsonObject<T>(text: string, validate: (value: unknown) => T, conte
   throw new Error(`モデル応答が JSON として解釈できませんでした: ${stripped.slice(0, 300)}`)
 }
 
+function parseReviewerJsonOutput(text: string, context: JsonParseContext): ReviewerOutput {
+  return parseJsonObject(text, validateReviewerOutput, context)
+}
+
+function parseExaminerJsonOutput(text: string, context: JsonParseContext): ExaminerOutput {
+  return parseJsonObject(text, validateExaminerOutput, context)
+}
+
+function parseRebuttalJsonOutput(text: string, context: JsonParseContext): RebuttalOutput {
+  return parseJsonObject(text, validateRebuttalOutput, context)
+}
+
+function parseConclusionJsonOutput(text: string, context: JsonParseContext): ConclusionOutput {
+  return parseJsonObject(text, validateConclusionOutput, context)
+}
+
 function repairUnescapedJsonStringQuotes(text: string): string {
   let repaired = ''
   let inString = false
@@ -3697,6 +4017,123 @@ async function writePromptFile(
     textEncoder.encode(renderPromptFile(report, reviewerPrompt, consolidatorPrompt, input)),
   )
   return promptUri
+}
+
+async function createModelDebugLogger(
+  workspaceRoot: string,
+  input: RunInput,
+  createdAt: string,
+  output: vscode.OutputChannel,
+): Promise<ModelDebugLogger> {
+  const directoryName = sanitizeDebugPathSegment(
+    `${toFileTimestamp(createdAt)}-${input.reviewId ?? 'review'}-${input.sessionId ?? 'session'}`,
+  )
+  const rootUri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), '.argos', 'debug', directoryName)
+  const manifestUri = vscode.Uri.joinPath(rootUri, 'manifest.json')
+  const logger = new ModelDebugLogger(rootUri, manifestUri, output, {
+    schema_version: 1,
+    created_at: createdAt,
+    review_id: input.reviewId ?? null,
+    session_id: input.sessionId ?? null,
+    repository_root: input.repositoryRoot,
+    directory: rootUri.fsPath,
+  })
+  await logger.initialize()
+  return logger
+}
+
+function renderDebugPrompt(record: ModelDebugAttemptRecord): string {
+  return [
+    '# ARGOS Language Model Prompt Debug',
+    '',
+    `- Label: ${record.label}`,
+    `- Attempt: ${record.attempt}/${record.maxAttempts}`,
+    `- Model: ${record.modelName}`,
+    `- Prompt mode: ${record.promptMode}`,
+    `- Input tokens: ${record.tokenCount}/${record.maxInputTokens}`,
+    '',
+    '## Prompt',
+    '',
+    '<<<ARGOS_DEBUG_PROMPT',
+    record.promptText,
+    'ARGOS_DEBUG_PROMPT>>>',
+    '',
+  ].join('\n')
+}
+
+function sanitizeDebugPathSegment(value: string): string {
+  const sanitized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return sanitized || 'debug'
+}
+
+function stringifyDebugJson(value: unknown): string {
+  try {
+    return `${JSON.stringify(value, debugJsonReplacer, 2)}\n`
+  } catch (error) {
+    return `${JSON.stringify({ serialization_error: formatError(error), fallback: String(value) }, null, 2)}\n`
+  }
+}
+
+function debugJsonReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === 'bigint') {
+    return value.toString()
+  }
+  if (value instanceof Uint8Array) {
+    return `[Uint8Array ${value.byteLength} bytes]`
+  }
+  return value
+}
+
+function formatLanguageModelMessagesForDebug(messages: vscode.LanguageModelChatMessage[]): string {
+  return messages
+    .map((message, index) => {
+      const parts = message.content.map(formatLanguageModelInputPartForDebug).join('\n\n')
+      return `### Message ${index + 1} (${vscode.LanguageModelChatMessageRole[message.role]})\n\n${parts}`
+    })
+    .join('\n\n---\n\n')
+}
+
+function formatLanguageModelInputPartForDebug(part: vscode.LanguageModelInputPart): string {
+  if (part instanceof vscode.LanguageModelTextPart) {
+    return part.value
+  }
+  if (part instanceof vscode.LanguageModelToolCallPart) {
+    return `[tool call: ${part.name}]\n${stringifyDebugJson(part.input).trimEnd()}`
+  }
+  if (part instanceof vscode.LanguageModelToolResultPart) {
+    return `[tool result: ${part.callId}]\n${formatToolResultContentForDebug(part.content)}`
+  }
+  if (part instanceof vscode.LanguageModelDataPart) {
+    return '[data part]'
+  }
+  return '[unknown input part]'
+}
+
+function formatToolResultContentForDebug(
+  content: Array<
+    vscode.LanguageModelTextPart | vscode.LanguageModelPromptTsxPart | vscode.LanguageModelDataPart | unknown
+  >,
+): string {
+  return content.map(formatToolResultPartForDebug).join('\n\n')
+}
+
+function formatToolResultPartForDebug(
+  part: vscode.LanguageModelTextPart | vscode.LanguageModelPromptTsxPart | vscode.LanguageModelDataPart | unknown,
+): string {
+  if (part instanceof vscode.LanguageModelTextPart) {
+    return part.value
+  }
+  if (part instanceof vscode.LanguageModelDataPart) {
+    return '[data part]'
+  }
+  if (part && typeof part === 'object' && 'constructor' in part) {
+    return `[${part.constructor.name}]`
+  }
+  return String(part)
 }
 
 function toFileTimestamp(value: string): string {

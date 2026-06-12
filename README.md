@@ -54,6 +54,7 @@ npm run build
 - `argos.contextBudget`: 各モデルリクエストへ送信する追加コンテキストの最大文字数です。既定値は `220000` です。
 - `argos.generatePromptFile`: レビュー完了後に Copilot への追加質問・修正依頼用 `.github/prompts/*.prompt.md` を生成します。既定値は `true` です。
 - `argos.includeUncommittedChanges`: レビュー差分にステージ済み変更と未ステージの追跡済みファイル変更を含めます。未追跡ファイルは含まれません。既定値は `true` です。
+- `argos.languageModelRetryAttempts`: Language Model API リクエストが失敗した際のリトライ回数です。`0`（リトライなし）、`1`、`2` のいずれかを指定します。既定値は `2` です。
 - `argos.activePreset`: 既定選択として使うモデル preset 名です。
 - `argos.presets`: レビュワー（初回） / 任意のレビュワー（初回・2人目） / 任意の統合者 / 評価者 / レビュワー（2, 3回目）の名前付きモデルプリセットです。`reviewer2` と `consolidator` はセットで指定します。リポジトリや worktree をまたいで同じ個人用プリセットを使いたい場合は、VS Code の User Settings に設定します。各プリセットには以下のプロパティを指定できます：
   - `reviewer` — レビュワー（初回）モデル（必須）

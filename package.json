@@ -2,7 +2,7 @@
   "name": "argos-vscode-extension",
   "displayName": "ARGOS Auto Review",
   "description": "Run ARGOS auto review with VS Code Copilot language models.",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "private": true,
   "publisher": "argos",
   "files": [
@@ -56,6 +56,21 @@
           "type": "boolean",
           "default": true,
           "description": "Include committed changes plus staged changes and unstaged changes to tracked files in review diffs. Untracked files are not included."
+        },
+        "argos.languageModelRetryAttempts": {
+          "type": "integer",
+          "default": 2,
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "enumDescriptions": [
+            "Do not retry on failure.",
+            "Retry once on failure.",
+            "Retry twice on failure."
+          ],
+          "description": "Number of times to retry a Language Model API request on failure (0, 1, or 2). Defaults to 2."
         },
         "argos.activePreset": {
           "type": "string",

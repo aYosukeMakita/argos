@@ -263,7 +263,6 @@ const maxImageAttachments = 5
 const maxTotalAttachments = 10
 const maxDiscussionRounds = 3
 const defaultDiscussionRounds = 3
-const languageModelRetryAttempts = 2
 const languageModelRetryDelayMs = 2_000
 const maxLanguageModelToolRounds = 6
 const maxLanguageModelReadLines = 240
@@ -2570,6 +2569,9 @@ async function callLanguageModel(
   const startedAt = Date.now()
   const preparedInput = await prepareLanguageModelInput(model, promptRequest, input, token, output, label)
   const tools = createLanguageModelTools(model)
+  const languageModelRetryAttempts = vscode.workspace
+    .getConfiguration('argos')
+    .get<number>('languageModelRetryAttempts', 2)
   const maxAttempts = languageModelRetryAttempts + 1
   let lastError: unknown
 

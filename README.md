@@ -59,6 +59,7 @@ npm run build
   - `reviewer` — レビュワー（初回）モデル（必須）
   - `examiner` — 評価者モデル（必須）
   - `rebuttal` — レビュワー（2, 3回目）モデル（必須）
+  - `maxRounds` — 評価者⇄レビュワー間の議論回数（`1`〜`3`）。`1` を指定するとレビュワー（2, 3回目）に順番が回らず、フォーム上のモデル選択欄も無効化されます。範囲外の値や未指定の場合はデフォルト値の `3` が割り当てられます
   - `useSecondReviewer` — 第2レビュワーと統合者をデフォルトで有効にするかどうか。省略時は `reviewer2` が定義されていれば `true`、なければ `false`
   - `reviewer2` — 第2レビュワー（初回）モデル（`consolidator` とセット）
   - `consolidator` — 統合者モデル（`reviewer2` とセット）
@@ -71,18 +72,21 @@ User Settings JSON の例:
     "argos.presets": {
         "model1": {
             "label": "バランス型",
+            "maxRounds": 2,
             "reviewer": { "model": "GPT-5.5" },
             "examiner": { "model": "Claude Sonnet 4.6" },
             "rebuttal": { "model": "GPT-5.4" }
         },
         "model2": {
             "label": "低コスト",
+            "maxRounds": 1,
             "reviewer": { "model": "Claude Sonnet 4.6" },
             "examiner": { "model": "GPT-5.4" },
             "rebuttal": { "model": "Claude Sonnet 4.6" }
         },
         "model3": {
             "label": "最高性能",
+            "maxRounds": 3,
             "useSecondReviewer": true,
             "reviewer": { "model": "GPT-5.5" },
             "reviewer2": { "model": "Claude Opus 4.8" },
@@ -94,4 +98,4 @@ User Settings JSON の例:
 }
 ```
 
-`model` の値には、内部 model ID ではなく、VS Code 上でユーザーに表示されるモデルラベルを指定します。`useSecondReviewer` を明示しない場合、`reviewer2` が定義されていればチェックボックスがデフォルトで ON になります。`useSecondReviewer: false` を明示すると、`reviewer2` / `consolidator` が定義されていてもチェックボックスはデフォルト OFF になります。
+`model` の値には、内部 model ID ではなく、VS Code 上でユーザーに表示されるモデルラベルを指定します。`useSecondReviewer` を明示しない場合、`reviewer2` が定義されていればチェックボックスがデフォルトで ON になります。`useSecondReviewer: false` を明示すると、`reviewer2` / `consolidator` が定義されていてもチェックボックスはデフォルト OFF になります。`maxRounds` はプリセット選択時にフォームの議論回数へ反映され、`1` を選ぶとレビュワー（2, 3回目）のモデル選択欄が無効化されます。

@@ -2,7 +2,7 @@
   "name": "argos-vscode-extension",
   "displayName": "ARGOS Auto Review",
   "description": "Run ARGOS auto review with VS Code Copilot language models.",
-  "version": "0.4.3",
+  "version": "0.4.5",
   "private": true,
   "publisher": "argos",
   "files": [
@@ -76,6 +76,13 @@
               "description": {
                 "type": "string",
                 "description": "Human-readable description for the preset."
+              },
+              "maxRounds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3,
+                "default": 3,
+                "description": "Maximum number of Examiner/Rebuttal discussion rounds (1-3). Selecting 1 skips the Rebuttal turn. Invalid or missing values default to 3."
               },
               "useSecondReviewer": {
                 "type": "boolean",

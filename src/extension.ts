@@ -33,6 +33,7 @@ interface ModelPresetRole {
 interface ModelPreset {
   label?: string
   description?: string
+  maxRounds?: number
   useSecondReviewer?: boolean
   reviewer?: ModelPresetRole
   reviewer2?: ModelPresetRole
@@ -117,6 +118,7 @@ interface ReviewFormResult {
   purpose: string
   attachments: ReviewAttachment[]
   models: SelectedModels
+  maxRounds: number
 }
 
 type ReviewAttachmentKind = 'image' | 'text'
@@ -153,6 +155,32 @@ interface MeasuredPromptCandidate extends PromptCandidate {
   tokenCount: number
 }
 
+interface ArgosToolInvocationContext {
+  repositoryRoot: string
+  output: vscode.OutputChannel
+  label: string
+}
+
+interface ArgosLanguageModelToolDefinition {
+  tool: vscode.LanguageModelChatTool
+  invoke(
+    input: unknown,
+    context: ArgosToolInvocationContext,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.LanguageModelToolResult>
+}
+
+interface ArgosReadFileToolInput {
+  path: string
+  startLine?: number
+  endLine?: number
+}
+
+interface ArgosSearchTextToolInput {
+  query: string
+  maxResults?: number
+}
+
 interface SerializedModel {
   id: string
   label: string
@@ -164,6 +192,7 @@ interface SerializedModel {
 interface SerializedPreset {
   name: string
   label: string
+  maxRounds: number
   reviewerModelId: string
   reviewer2ModelId?: string
   consolidatorModelId?: string
@@ -185,6 +214,7 @@ interface ReviewFormLabels {
   consolidatorModelLabel: string
   examinerModelLabel: string
   rebuttalModelLabel: string
+  maxRoundsLabel: string
   reviewRequirements: string
   reviewRequirementsPlaceholder: string
   attachmentDropLabel: string
@@ -231,10 +261,32 @@ const textDecoder = new TextDecoder('utf8')
 const textEncoder = new TextEncoder()
 const maxImageAttachments = 5
 const maxTotalAttachments = 10
+const maxDiscussionRounds = 3
+const defaultDiscussionRounds = 3
+const languageModelRetryAttempts = 2
+const languageModelRetryDelayMs = 2_000
+const maxLanguageModelToolRounds = 6
+const maxLanguageModelReadLines = 240
+const maxLanguageModelSearchResults = 20
+const maxLanguageModelToolOutputChars = 20_000
 const inputCompactionThresholdRatio = 0.85
 const inputWarningThresholdRatio = 0.8
 const compactMessageMaxChars = 8_000
 const compactFindingSectionMaxChars = 1_600
+
+class LanguageModelRetryExhaustedError extends Error {
+  constructor(
+    readonly label: string,
+    readonly retryAttempts: number,
+    lastError: unknown,
+  ) {
+    super(
+      `${label}: Copilot の応答取得に失敗しました。初回リクエストと ${retryAttempts} 回のリトライがすべて失敗しました: ${formatError(lastError)}`,
+      { cause: lastError },
+    )
+    this.name = 'LanguageModelRetryExhaustedError'
+  }
+}
 
 const metadataFiles = [
   'package.json',
@@ -349,284 +401,297 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
   if (!reviewForm) {
     return
   }
-  const { models, purpose, attachments } = reviewForm
+  const { models, purpose, attachments, maxRounds } = reviewForm
 
   const reviewerPrompt = await readPromptAsset(context, 'reviewer.md')
   const consolidatorPrompt = await readPromptAsset(context, 'consolidator.md')
   const examinerPrompt = await readPromptAsset(context, 'examiner.md')
   const rebuttalPrompt = await readPromptAsset(context, 'rebuttal.md')
 
-  await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: 'ARGOS auto review',
-      cancellable: true,
-    },
-    async (progress, token) => {
-      output.clear()
-      output.show(true)
-      logStep(output, `Workspace: ${workspaceFolder.uri.fsPath}`)
-      logStep(output, `Report directory: ${workspaceFolder.uri.fsPath}`)
-      logStep(output, `Reviewer model: ${modelNameForStorage(models.reviewer)}`)
-      if (models.reviewer2) {
-        logStep(output, `Reviewer 2 model: ${modelNameForStorage(models.reviewer2)}`)
-      }
-      if (models.consolidator) {
-        logStep(output, `Consolidator model: ${modelNameForStorage(models.consolidator)}`)
-      }
-      logStep(output, `Examiner model: ${modelNameForStorage(models.examiner)}`)
-      logStep(output, `Rebuttal model: ${modelNameForStorage(models.rebuttal)}`)
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'ARGOS auto review',
+        cancellable: true,
+      },
+      async (progress, token) => {
+        output.clear()
+        output.show(true)
+        logStep(output, `Workspace: ${workspaceFolder.uri.fsPath}`)
+        logStep(output, `Report directory: ${workspaceFolder.uri.fsPath}`)
+        logStep(output, `Reviewer model: ${modelNameForStorage(models.reviewer)}`)
+        if (models.reviewer2) {
+          logStep(output, `Reviewer 2 model: ${modelNameForStorage(models.reviewer2)}`)
+        }
+        if (models.consolidator) {
+          logStep(output, `Consolidator model: ${modelNameForStorage(models.consolidator)}`)
+        }
+        logStep(output, `Examiner model: ${modelNameForStorage(models.examiner)}`)
+        if (maxRounds > 1) {
+          logStep(output, `Rebuttal model: ${modelNameForStorage(models.rebuttal)}`)
+        }
+        logStep(output, `Max discussion rounds: ${maxRounds}`)
 
-      progress.report({ message: '変更差分を収集しています' })
-      const collected = await collectReviewInput(workspaceFolder.uri.fsPath, settings, attachments)
-      throwIfCancelled(token)
-      logStep(output, `Git repository: ${collected.repositoryRoot}`)
-      logStep(output, `Diff range: ${collected.diffRange}`)
-      logStep(output, `Diff: ${collected.diffPatch.length} chars`)
-      logStep(output, `Context: ${collected.codeContext?.length ?? 0} chars`)
-      logStep(output, `Attachments: ${attachments.length}`)
+        progress.report({ message: '変更差分を収集しています' })
+        const collected = await collectReviewInput(workspaceFolder.uri.fsPath, settings, attachments)
+        throwIfCancelled(token)
+        logStep(output, `Git repository: ${collected.repositoryRoot}`)
+        logStep(output, `Diff range: ${collected.diffRange}`)
+        logStep(output, `Diff: ${collected.diffPatch.length} chars`)
+        logStep(output, `Context: ${collected.codeContext?.length ?? 0} chars`)
+        logStep(output, `Attachments: ${attachments.length}`)
 
-      const input: RunInput = {
-        purpose,
-        repositoryRoot: collected.repositoryRoot,
-        diffPatch: collected.diffPatch,
-        codeContext: collected.codeContext,
-        attachments,
-      }
-      const reviewId = createLocalId('review')
-      const sessionId = createLocalId('session')
-      input.reviewId = reviewId
-      input.sessionId = sessionId
-      const messages: DiscussionMessageRecord[] = []
-      const createdAt = new Date().toISOString()
+        const input: RunInput = {
+          purpose,
+          repositoryRoot: collected.repositoryRoot,
+          diffPatch: collected.diffPatch,
+          codeContext: collected.codeContext,
+          attachments,
+        }
+        const reviewId = createLocalId('review')
+        const sessionId = createLocalId('session')
+        input.reviewId = reviewId
+        input.sessionId = sessionId
+        const messages: DiscussionMessageRecord[] = []
+        const createdAt = new Date().toISOString()
 
-      progress.report({
-        message: models.reviewer2
-          ? 'Reviewer 1/2 を並列実行しています'
-          : `Reviewer を ${models.reviewer.name} で実行しています`,
-      })
-      logStep(
-        output,
-        models.reviewer2
-          ? `Reviewer 1/2 を並列実行します (${modelNameForStorage(models.reviewer)}, ${modelNameForStorage(models.reviewer2)})`
-          : `Reviewer を ${modelNameForStorage(models.reviewer)} で実行します`,
-      )
-      const reviewerTasks: Array<Promise<{ label: string; model: vscode.LanguageModelChat; raw: string }>> = [
-        callLanguageModel(
-          models.reviewer,
-          reviewerPromptRequest(reviewerPrompt, input),
-          input,
-          token,
+        progress.report({
+          message: models.reviewer2
+            ? 'Reviewer 1/2 を並列実行しています'
+            : `Reviewer を ${models.reviewer.name} で実行しています`,
+        })
+        logStep(
           output,
-          'Reviewer 1',
-        ).then(raw => ({ label: 'Reviewer 1', model: models.reviewer, raw })),
-      ]
-      if (models.reviewer2) {
-        reviewerTasks.push(
+          models.reviewer2
+            ? `Reviewer 1/2 を並列実行します (${modelNameForStorage(models.reviewer)}, ${modelNameForStorage(models.reviewer2)})`
+            : `Reviewer を ${modelNameForStorage(models.reviewer)} で実行します`,
+        )
+        const reviewerTasks: Array<Promise<{ label: string; model: vscode.LanguageModelChat; raw: string }>> = [
           callLanguageModel(
-            models.reviewer2,
+            models.reviewer,
             reviewerPromptRequest(reviewerPrompt, input),
             input,
             token,
             output,
-            'Reviewer 2',
-          ).then(raw => ({ label: 'Reviewer 2', model: models.reviewer2 as vscode.LanguageModelChat, raw })),
-        )
-      }
-      const reviewerResults = await Promise.all(reviewerTasks)
-      throwIfCancelled(token)
-      for (const result of reviewerResults) {
-        const reviewer = parseJsonObject<ReviewerOutput>(result.raw, validateReviewerOutput, {
-          label: result.label,
-          output,
-        })
-        messages.push({
-          id: messages.length + 1,
-          session_id: sessionId,
-          round: 1,
-          agent: 'REVIEWER',
-          model_name: modelNameForStorage(result.model),
-          content: reviewer.content,
-          judgment: null,
-          created_at: new Date().toISOString(),
-        })
-      }
-
-      if (models.reviewer2) {
-        if (!models.consolidator) {
-          throw new Error('第2レビュワーを使う場合は統合者モデルが必要です')
+            'Reviewer 1',
+          ).then(raw => ({ label: 'Reviewer 1', model: models.reviewer, raw })),
+        ]
+        if (models.reviewer2) {
+          reviewerTasks.push(
+            callLanguageModel(
+              models.reviewer2,
+              reviewerPromptRequest(reviewerPrompt, input),
+              input,
+              token,
+              output,
+              'Reviewer 2',
+            ).then(raw => ({ label: 'Reviewer 2', model: models.reviewer2 as vscode.LanguageModelChat, raw })),
+          )
         }
-        progress.report({ message: `統合者を ${models.consolidator.name} で実行しています` })
-        logStep(output, `統合者を ${modelNameForStorage(models.consolidator)} で実行します`)
-        const consolidatorRaw = await callLanguageModel(
-          models.consolidator,
-          consolidatorPromptRequest(
-            consolidatorPrompt,
-            input,
-            messages.filter(message => message.agent === 'REVIEWER'),
-          ),
-          input,
-          token,
-          output,
-          'Consolidator',
-        )
-        const consolidated = parseJsonObject<ReviewerOutput>(consolidatorRaw, validateReviewerOutput, {
-          label: 'Consolidator',
-          output,
-        })
+        const reviewerResults = await Promise.all(reviewerTasks)
         throwIfCancelled(token)
-        messages.push({
-          id: messages.length + 1,
-          session_id: sessionId,
-          round: 1,
-          agent: 'CONSOLIDATOR',
-          model_name: modelNameForStorage(models.consolidator),
-          content: consolidated.content,
-          judgment: null,
-          created_at: new Date().toISOString(),
-        })
-      }
-      logArtifact(output, `review_id: ${reviewId}`)
-      logArtifact(output, `session_id: ${sessionId}`)
-
-      let nextAction: NextAction = {
-        agent: 'EXAMINER',
-        round: 1,
-        status: 'ongoing',
-        final_judgment: null,
-        completion_reason: null,
-      }
-
-      while (nextAction.status === 'ongoing' && nextAction.agent) {
-        throwIfCancelled(token)
-
-        if (nextAction.agent === 'EXAMINER') {
-          progress.report({
-            message: `Round ${nextAction.round}: Examiner を ${models.examiner.name} で実行しています`,
+        for (const result of reviewerResults) {
+          const reviewer = parseJsonObject<ReviewerOutput>(result.raw, validateReviewerOutput, {
+            label: result.label,
+            output,
           })
-          logStep(output, `Round ${nextAction.round}: Examiner を ${modelNameForStorage(models.examiner)} で実行します`)
-          const examinerRaw = await callLanguageModel(
-            models.examiner,
-            discussionPromptRequest(examinerPrompt, input, messages),
+          messages.push({
+            id: messages.length + 1,
+            session_id: sessionId,
+            round: 1,
+            agent: 'REVIEWER',
+            model_name: modelNameForStorage(result.model),
+            content: reviewer.content,
+            judgment: null,
+            created_at: new Date().toISOString(),
+          })
+        }
+
+        if (models.reviewer2) {
+          if (!models.consolidator) {
+            throw new Error('第2レビュワーを使う場合は統合者モデルが必要です')
+          }
+          progress.report({ message: `統合者を ${models.consolidator.name} で実行しています` })
+          logStep(output, `統合者を ${modelNameForStorage(models.consolidator)} で実行します`)
+          const consolidatorRaw = await callLanguageModel(
+            models.consolidator,
+            consolidatorPromptRequest(
+              consolidatorPrompt,
+              input,
+              messages.filter(message => message.agent === 'REVIEWER'),
+            ),
             input,
             token,
             output,
-            `Round ${nextAction.round} Examiner`,
+            'Consolidator',
           )
-          const examiner = parseJsonObject<ExaminerOutput>(examinerRaw, validateExaminerOutput, {
-            label: `Round ${nextAction.round} Examiner`,
+          const consolidated = parseJsonObject<ReviewerOutput>(consolidatorRaw, validateReviewerOutput, {
+            label: 'Consolidator',
+            output,
+          })
+          throwIfCancelled(token)
+          messages.push({
+            id: messages.length + 1,
+            session_id: sessionId,
+            round: 1,
+            agent: 'CONSOLIDATOR',
+            model_name: modelNameForStorage(models.consolidator),
+            content: consolidated.content,
+            judgment: null,
+            created_at: new Date().toISOString(),
+          })
+        }
+        logArtifact(output, `review_id: ${reviewId}`)
+        logArtifact(output, `session_id: ${sessionId}`)
+
+        let nextAction: NextAction = {
+          agent: 'EXAMINER',
+          round: 1,
+          status: 'ongoing',
+          final_judgment: null,
+          completion_reason: null,
+        }
+
+        while (nextAction.status === 'ongoing' && nextAction.agent) {
+          throwIfCancelled(token)
+
+          if (nextAction.agent === 'EXAMINER') {
+            progress.report({
+              message: `Round ${nextAction.round}: Examiner を ${models.examiner.name} で実行しています`,
+            })
+            logStep(
+              output,
+              `Round ${nextAction.round}: Examiner を ${modelNameForStorage(models.examiner)} で実行します`,
+            )
+            const examinerRaw = await callLanguageModel(
+              models.examiner,
+              discussionPromptRequest(examinerPrompt, input, messages),
+              input,
+              token,
+              output,
+              `Round ${nextAction.round} Examiner`,
+            )
+            const examiner = parseJsonObject<ExaminerOutput>(examinerRaw, validateExaminerOutput, {
+              label: `Round ${nextAction.round} Examiner`,
+              output,
+            })
+            messages.push({
+              id: messages.length + 1,
+              session_id: sessionId,
+              round: nextAction.round,
+              agent: 'EXAMINER',
+              model_name: modelNameForStorage(models.examiner),
+              content: examiner.content,
+              judgment: examiner.judgment,
+              created_at: new Date().toISOString(),
+            })
+            logArtifact(output, `Examiner judgment: ${examiner.judgment}`)
+            nextAction = nextActionAfterExaminer(nextAction.round, examiner.judgment, maxRounds)
+            continue
+          }
+
+          progress.report({
+            message: `Round ${nextAction.round}: Rebuttal を ${models.rebuttal.name} で実行しています`,
+          })
+          logStep(output, `Round ${nextAction.round}: Rebuttal を ${modelNameForStorage(models.rebuttal)} で実行します`)
+          const rebuttalRaw = await callLanguageModel(
+            models.rebuttal,
+            discussionPromptRequest(rebuttalPrompt, input, messages),
+            input,
+            token,
+            output,
+            `Round ${nextAction.round} Rebuttal`,
+          )
+          const rebuttal = parseJsonObject<RebuttalOutput>(rebuttalRaw, validateRebuttalOutput, {
+            label: `Round ${nextAction.round} Rebuttal`,
             output,
           })
           messages.push({
             id: messages.length + 1,
             session_id: sessionId,
             round: nextAction.round,
-            agent: 'EXAMINER',
-            model_name: modelNameForStorage(models.examiner),
-            content: examiner.content,
-            judgment: examiner.judgment,
+            agent: 'REBUTTAL',
+            model_name: modelNameForStorage(models.rebuttal),
+            content: rebuttal.content,
+            judgment: null,
             created_at: new Date().toISOString(),
           })
-          logArtifact(output, `Examiner judgment: ${examiner.judgment}`)
-          nextAction = nextActionAfterExaminer(nextAction.round, examiner.judgment)
-          continue
+          logArtifact(output, 'Rebuttal を投稿しました')
+          nextAction = {
+            agent: 'EXAMINER',
+            round: nextAction.round,
+            status: 'ongoing',
+            final_judgment: null,
+            completion_reason: null,
+          }
         }
 
-        progress.report({
-          message: `Round ${nextAction.round}: Rebuttal を ${models.rebuttal.name} で実行しています`,
-        })
-        logStep(output, `Round ${nextAction.round}: Rebuttal を ${modelNameForStorage(models.rebuttal)} で実行します`)
-        const rebuttalRaw = await callLanguageModel(
-          models.rebuttal,
-          discussionPromptRequest(rebuttalPrompt, input, messages),
+        if (!nextAction.final_judgment || !nextAction.completion_reason) {
+          throw new Error('レビューの最終判定を確定できませんでした')
+        }
+
+        progress.report({ message: '最終的にバグと判定された指摘を抽出しています' })
+        logStep(output, 'Conclusion: 最終的にバグと判定された指摘だけを抽出します')
+        const conclusionRaw = await callLanguageModel(
+          models.examiner,
+          conclusionPromptRequest(conclusionSystemPrompt(), input, messages, nextAction.final_judgment),
           input,
           token,
           output,
-          `Round ${nextAction.round} Rebuttal`,
+          'Conclusion',
         )
-        const rebuttal = parseJsonObject<RebuttalOutput>(rebuttalRaw, validateRebuttalOutput, {
-          label: `Round ${nextAction.round} Rebuttal`,
+        const conclusion = parseJsonObject<ConclusionOutput>(conclusionRaw, validateConclusionOutput, {
+          label: 'Conclusion',
           output,
         })
-        messages.push({
-          id: messages.length + 1,
-          session_id: sessionId,
-          round: nextAction.round,
-          agent: 'REBUTTAL',
-          model_name: modelNameForStorage(models.rebuttal),
-          content: rebuttal.content,
-          judgment: null,
-          created_at: new Date().toISOString(),
-        })
-        logArtifact(output, 'Rebuttal を投稿しました')
-        nextAction = {
-          agent: 'EXAMINER',
-          round: nextAction.round,
-          status: 'ongoing',
-          final_judgment: null,
-          completion_reason: null,
+        throwIfCancelled(token)
+
+        const reportDraft: Omit<ReviewReport, 'markdownUri'> = {
+          reviewId,
+          sessionId,
+          createdAt,
+          purpose,
+          attachments: attachments.map(attachment => ({
+            kind: attachment.kind,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+          })),
+          repositoryRoot: collected.repositoryRoot,
+          diffRange: collected.diffRange,
+          conclusionMarkdown: conclusion.content,
+          finalJudgment: nextAction.final_judgment,
+          completionReason: nextAction.completion_reason,
+          models: {
+            reviewer: modelNameForStorage(models.reviewer),
+            reviewer2: models.reviewer2 ? modelNameForStorage(models.reviewer2) : undefined,
+            consolidator: models.consolidator ? modelNameForStorage(models.consolidator) : undefined,
+            examiner: modelNameForStorage(models.examiner),
+            rebuttal: modelNameForStorage(models.rebuttal),
+          },
+          messages,
         }
-      }
-
-      if (!nextAction.final_judgment || !nextAction.completion_reason) {
-        throw new Error('レビューの最終判定を確定できませんでした')
-      }
-
-      progress.report({ message: '最終的にバグと判定された指摘を抽出しています' })
-      logStep(output, 'Conclusion: 最終的にバグと判定された指摘だけを抽出します')
-      const conclusionRaw = await callLanguageModel(
-        models.examiner,
-        conclusionPromptRequest(conclusionSystemPrompt(), input, messages, nextAction.final_judgment),
-        input,
-        token,
-        output,
-        'Conclusion',
-      )
-      const conclusion = parseJsonObject<ConclusionOutput>(conclusionRaw, validateConclusionOutput, {
-        label: 'Conclusion',
-        output,
-      })
-      throwIfCancelled(token)
-
-      const reportDraft: Omit<ReviewReport, 'markdownUri'> = {
-        reviewId,
-        sessionId,
-        createdAt,
-        purpose,
-        attachments: attachments.map(attachment => ({
-          kind: attachment.kind,
-          name: attachment.name,
-          mimeType: attachment.mimeType,
-        })),
-        repositoryRoot: collected.repositoryRoot,
-        diffRange: collected.diffRange,
-        conclusionMarkdown: conclusion.content,
-        finalJudgment: nextAction.final_judgment,
-        completionReason: nextAction.completion_reason,
-        models: {
-          reviewer: modelNameForStorage(models.reviewer),
-          reviewer2: models.reviewer2 ? modelNameForStorage(models.reviewer2) : undefined,
-          consolidator: models.consolidator ? modelNameForStorage(models.consolidator) : undefined,
-          examiner: modelNameForStorage(models.examiner),
-          rebuttal: modelNameForStorage(models.rebuttal),
-        },
-        messages,
-      }
-      const markdownUri = await writeMarkdownReport(workspaceFolder.uri.fsPath, reportDraft)
-      const promptUri = settings.generatePromptFile
-        ? await writePromptFile(workspaceFolder.uri.fsPath, reportDraft, reviewerPrompt, consolidatorPrompt, input)
-        : undefined
-      const report: ReviewReport = { ...reportDraft, markdownUri, promptUri }
-      const finalJudgment = report.finalJudgment
-      logArtifact(output, `Final judgment: ${finalJudgment}`)
-      logArtifact(output, `Completion reason: ${report.completionReason}`)
-      logArtifact(output, `Markdown report: ${report.markdownUri.fsPath}`)
-      if (report.promptUri) {
-        logArtifact(output, `Prompt file: ${report.promptUri.fsPath}`)
-      }
-      await openReviewPreview(context, report)
-    },
-  )
+        const markdownUri = await writeMarkdownReport(workspaceFolder.uri.fsPath, reportDraft)
+        const promptUri = settings.generatePromptFile
+          ? await writePromptFile(workspaceFolder.uri.fsPath, reportDraft, reviewerPrompt, consolidatorPrompt, input)
+          : undefined
+        const report: ReviewReport = { ...reportDraft, markdownUri, promptUri }
+        const finalJudgment = report.finalJudgment
+        logArtifact(output, `Final judgment: ${finalJudgment}`)
+        logArtifact(output, `Completion reason: ${report.completionReason}`)
+        logArtifact(output, `Markdown report: ${report.markdownUri.fsPath}`)
+        if (report.promptUri) {
+          logArtifact(output, `Prompt file: ${report.promptUri.fsPath}`)
+        }
+        await openReviewPreview(context, report)
+      },
+    )
+  } catch (error) {
+    if (error instanceof LanguageModelRetryExhaustedError) {
+      logRetryExhaustedReviewInput(output, workspaceFolder, reviewForm)
+    }
+    throw error
+  }
 }
 
 async function selectWorkspaceFolder(): Promise<vscode.WorkspaceFolder | undefined> {
@@ -678,6 +743,8 @@ async function showReviewForm(
   const defaultExaminer =
     presetModels?.examiner ?? rankModels(availableModels, examinerModelKeywords)[0] ?? sortedModels[0]
   const defaultReviewer2 = presetModels?.reviewer2 ?? defaultReviewer
+  const activePreset = settings.activePreset ? settings.presets[settings.activePreset] : undefined
+  const defaultMaxRounds = normalizeMaxRounds(activePreset?.maxRounds)
   const defaultConsolidator = presetModels?.consolidator ?? defaultExaminer
   const defaultRebuttal = presetModels?.rebuttal ?? defaultExaminer
   const labels = getReviewFormLabels(vscode.env.language)
@@ -703,6 +770,7 @@ async function showReviewForm(
       : false,
     defaultExaminerId: defaultExaminer.id,
     defaultRebuttalId: defaultRebuttal.id,
+    defaultMaxRounds,
     labels,
   })
 
@@ -746,6 +814,7 @@ async function showReviewForm(
         const consolidator = useSecondReviewer ? getModelById(modelById, record.consolidatorModelId) : undefined
         const examiner = getModelById(modelById, record.examinerModelId)
         const rebuttal = getModelById(modelById, record.rebuttalModelId)
+        const maxRounds = normalizeMaxRounds(record.maxRounds)
         const purpose =
           typeof record.purpose === 'string' && record.purpose.trim() ? record.purpose.trim() : labels.emptyPurpose
         const attachments = deserializeAttachments(record.attachments, labels)
@@ -758,7 +827,7 @@ async function showReviewForm(
         ) {
           throw new Error(labels.attachmentImageModelError)
         }
-        finish({ purpose, attachments, models: { reviewer, reviewer2, consolidator, examiner, rebuttal } })
+        finish({ purpose, attachments, models: { reviewer, reviewer2, consolidator, examiner, rebuttal }, maxRounds })
       } catch (error) {
         reject(error)
       }
@@ -802,6 +871,14 @@ function getModelById(modelById: Map<string, vscode.LanguageModelChat>, value: u
   return model
 }
 
+function normalizeMaxRounds(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > maxDiscussionRounds) {
+    return defaultDiscussionRounds
+  }
+  return parsed
+}
+
 function normalizeModelPresets(value: unknown): Record<string, ModelPreset> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {}
@@ -817,6 +894,7 @@ function normalizeModelPresets(value: unknown): Record<string, ModelPreset> {
     presets[presetName] = {
       label: normalizeOptionalString(record.label),
       description: normalizeOptionalString(record.description),
+      maxRounds: normalizeMaxRounds(record.maxRounds),
       useSecondReviewer: typeof record.useSecondReviewer === 'boolean' ? record.useSecondReviewer : undefined,
       reviewer: normalizePresetRole(record.reviewer),
       reviewer2: normalizePresetRole(record.reviewer2),
@@ -866,6 +944,7 @@ function serializePresets(
     return {
       name: presetName,
       label: preset.label ?? presetName,
+      maxRounds: normalizeMaxRounds(preset.maxRounds),
       reviewerModelId: models.reviewer.id,
       reviewer2ModelId: models.reviewer2?.id,
       consolidatorModelId: models.consolidator?.id,
@@ -957,6 +1036,7 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
       consolidatorModelLabel: '統合者',
       examinerModelLabel: '評価者',
       rebuttalModelLabel: 'レビュワー（2, 3回目）',
+      maxRoundsLabel: '議論回数（評価者⇄レビュワー）',
       reviewRequirements: 'レビュー観点',
       reviewRequirementsPlaceholder: 'Markdown でレビュー観点や追加要件を書けます',
       attachmentDropLabel: '添付資料',
@@ -990,6 +1070,7 @@ function getReviewFormLabels(language: string): ReviewFormLabels {
     consolidatorModelLabel: 'Consolidator',
     examinerModelLabel: 'Examiner',
     rebuttalModelLabel: 'Rebuttal',
+    maxRoundsLabel: 'Discussion rounds (Examiner ⇄ Rebuttal)',
     reviewRequirements: 'Review requirements',
     reviewRequirementsPlaceholder: 'Write review requirements or extra context in Markdown',
     attachmentDropLabel: 'Attachments',
@@ -1024,6 +1105,7 @@ function renderReviewFormHtml(input: {
   useSecondReviewerByDefault: boolean
   defaultExaminerId: string
   defaultRebuttalId: string
+  defaultMaxRounds: number
   labels: ReviewFormLabels
 }): string {
   const presetOptions = renderPresetOptions(input.presets, input.defaultPresetName)
@@ -1032,6 +1114,7 @@ function renderReviewFormHtml(input: {
   const consolidatorOptions = renderModelOptions(input.examinerModels, input.defaultConsolidatorId)
   const examinerOptions = renderModelOptions(input.examinerModels, input.defaultExaminerId)
   const rebuttalOptions = renderModelOptions(input.examinerModels, input.defaultRebuttalId)
+  const maxRoundsOptions = renderMaxRoundsOptions(input.defaultMaxRounds)
   const presetsJson = jsonForInlineScript(input.presets)
   const labels = input.labels
   const attachmentLabelsJson = jsonForInlineScript({
@@ -1314,6 +1397,10 @@ function renderReviewFormHtml(input: {
 
       <fieldset>
         <legend>${escapeHtml(labels.models)}</legend>
+        <div>
+          <label for="max-rounds">${escapeHtml(labels.maxRoundsLabel)}</label>
+          <select id="max-rounds">${maxRoundsOptions}</select>
+        </div>
         <div class="model-grid">
           <div class="model-field model-field--toggle-spacer">
             <label for="reviewer-model">${escapeHtml(labels.reviewerModelLabel)}</label>
@@ -1379,6 +1466,7 @@ function renderReviewFormHtml(input: {
     const consolidatorModel = document.getElementById('consolidator-model');
     const examinerModel = document.getElementById('examiner-model');
     const rebuttalModel = document.getElementById('rebuttal-model');
+    const maxRounds = document.getElementById('max-rounds');
     const purpose = document.getElementById('purpose');
     const attachmentFileButton = document.getElementById('attachment-file-button');
     const attachmentFileInput = document.getElementById('attachment-file-input');
@@ -1567,9 +1655,17 @@ function renderReviewFormHtml(input: {
       consolidatorModel.required = enabled;
     }
 
+    function updateRebuttalControls() {
+      // 議論回数が1の場合は Rebuttal に順番が回らないためモデル選択を無効化する
+      const rebuttalEnabled = Number(maxRounds.value) > 1;
+      rebuttalModel.disabled = !rebuttalEnabled;
+      rebuttalModel.required = rebuttalEnabled;
+    }
+
     function findMatchingPreset() {
       return presets.find(candidate => {
         if (
+          candidate.maxRounds !== Number(maxRounds.value) ||
           candidate.reviewerModelId !== reviewerModel.value ||
           candidate.examinerModelId !== examinerModel.value ||
           candidate.rebuttalModelId !== rebuttalModel.value
@@ -1597,6 +1693,12 @@ function renderReviewFormHtml(input: {
     }
 
     updateSecondReviewerControls();
+    updateRebuttalControls();
+
+    maxRounds.addEventListener('change', () => {
+      updateRebuttalControls();
+      updatePresetSelection();
+    });
 
     modelPreset.addEventListener('change', () => {
       const preset = presets.find(candidate => candidate.name === modelPreset.value);
@@ -1613,7 +1715,9 @@ function renderReviewFormHtml(input: {
       }
       examinerModel.value = preset.examinerModelId;
       rebuttalModel.value = preset.rebuttalModelId;
+      maxRounds.value = String(preset.maxRounds);
       updateSecondReviewerControls();
+      updateRebuttalControls();
     });
 
     [reviewerModel, reviewer2Model, consolidatorModel, examinerModel, rebuttalModel].forEach(select => {
@@ -1641,6 +1745,7 @@ function renderReviewFormHtml(input: {
         consolidatorModelId: consolidatorModel.value,
         examinerModelId: examinerModel.value,
         rebuttalModelId: rebuttalModel.value,
+        maxRounds: Number(maxRounds.value),
         purpose: purpose.value,
         attachments: attachmentState,
       });
@@ -1659,6 +1764,15 @@ function renderPresetOptions(presets: SerializedPreset[], selectedName: string):
     })
     .join('')
   return emptyOption + presetOptions
+}
+
+function renderMaxRoundsOptions(selected: number): string {
+  return Array.from({ length: maxDiscussionRounds }, (_, index) => index + 1)
+    .map(value => {
+      const isSelected = value === selected ? ' selected' : ''
+      return `<option value="${value}"${isSelected}>${value}</option>`
+    })
+    .join('')
 }
 
 function renderModelOptions(models: SerializedModel[], selectedId: string): string {
@@ -2455,54 +2569,440 @@ async function callLanguageModel(
 ): Promise<string> {
   const startedAt = Date.now()
   const preparedInput = await prepareLanguageModelInput(model, promptRequest, input, token, output, label)
-  logProgress(
-    output,
-    `${label}: Language Model API に送信します (${formatCount(preparedInput.text.length)} chars prompt, ${formatCount(preparedInput.tokenCount)}/${formatCount(model.maxInputTokens)} input tokens, ${preparedInput.mode})`,
-  )
+  const tools = createLanguageModelTools(model)
+  const maxAttempts = languageModelRetryAttempts + 1
+  let lastError: unknown
 
-  let response: vscode.LanguageModelChatResponse
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptLabel = maxAttempts > 1 ? `${label} (試行 ${attempt}/${maxAttempts})` : label
+    logProgress(
+      output,
+      `${attemptLabel}: Language Model API に送信します (${formatCount(preparedInput.text.length)} chars prompt, ${formatCount(preparedInput.tokenCount)}/${formatCount(model.maxInputTokens)} input tokens, ${preparedInput.mode})`,
+    )
+
+    try {
+      const result = await completeLanguageModelTurn(
+        model,
+        [preparedInput.message],
+        tools,
+        {
+          repositoryRoot: input.repositoryRoot,
+          output,
+          label: attemptLabel,
+        },
+        token,
+        startedAt,
+      )
+      if (shouldLogLanguageModelToolCallCount(label)) {
+        logArtifact(output, `${attemptLabel}: tool calls ${result.toolCallCount}`)
+      }
+      logProgress(
+        output,
+        `${attemptLabel}: 応答受信完了 ${formatCount(result.text.length)} chars (${formatElapsed(startedAt)})`,
+      )
+      return result.text
+    } catch (error) {
+      if (token.isCancellationRequested) {
+        throw error
+      }
+
+      lastError = error
+      if (attempt < maxAttempts) {
+        logProgress(
+          output,
+          `${label}: Copilot 応答取得に失敗しました (${formatError(error)})。${formatDuration(languageModelRetryDelayMs)} 後にリトライします (${attempt}/${languageModelRetryAttempts})`,
+        )
+        await delay(languageModelRetryDelayMs, token)
+        continue
+      }
+    }
+  }
+
+  throw new LanguageModelRetryExhaustedError(label, languageModelRetryAttempts, lastError)
+}
+
+function createLanguageModelTools(model: vscode.LanguageModelChat): ArgosLanguageModelToolDefinition[] {
+  const toolBudget = toolCallingBudget(model)
+  if (toolBudget <= 0) {
+    return []
+  }
+
+  const tools: ArgosLanguageModelToolDefinition[] = [
+    {
+      tool: {
+        name: 'argos_read_file',
+        description:
+          'Read a UTF-8 text file from the repository by relative path and optional 1-based line range. Use this when the diff references a file and you need exact surrounding implementation details.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Repository-relative file path such as src/extension.ts' },
+            startLine: { type: 'number', minimum: 1, description: 'Optional 1-based start line.' },
+            endLine: { type: 'number', minimum: 1, description: 'Optional 1-based end line.' },
+          },
+          required: ['path'],
+          additionalProperties: false,
+        },
+      },
+      invoke: (toolInput, context, invocationToken) => readFileTool(toolInput, context, invocationToken),
+    },
+    {
+      tool: {
+        name: 'argos_search_text',
+        description:
+          'Search tracked repository text files for an exact string such as a symbol name, configuration key, error message, or file name fragment. Use this before reading an unknown file path.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Exact text to search for.' },
+            maxResults: { type: 'number', minimum: 1, maximum: maxLanguageModelSearchResults },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+      },
+      invoke: (toolInput, context, invocationToken) => searchTextTool(toolInput, context, invocationToken),
+    },
+  ]
+
+  if (Number.isFinite(toolBudget)) {
+    return tools.slice(0, Math.min(tools.length, toolBudget))
+  }
+  return tools
+}
+
+async function completeLanguageModelTurn(
+  model: vscode.LanguageModelChat,
+  initialMessages: vscode.LanguageModelChatMessage[],
+  tools: ArgosLanguageModelToolDefinition[],
+  toolContext: ArgosToolInvocationContext,
+  token: vscode.CancellationToken,
+  startedAt: number,
+): Promise<{ text: string; toolCallCount: number }> {
+  const messages = [...initialMessages]
+  let toolCallCount = 0
+
+  for (let round = 0; round <= maxLanguageModelToolRounds; round += 1) {
+    const response = await sendLanguageModelRequest(
+      model,
+      messages,
+      tools,
+      token,
+      toolContext.output,
+      toolContext.label,
+      startedAt,
+    )
+    const { text, assistantParts, toolCalls } = await consumeLanguageModelResponse(
+      response,
+      toolContext.output,
+      toolContext.label,
+      startedAt,
+    )
+
+    if (toolCalls.length === 0) {
+      return { text, toolCallCount }
+    }
+
+    toolCallCount += toolCalls.length
+
+    if (round === maxLanguageModelToolRounds) {
+      throw new Error(
+        `${toolContext.label}: ツール呼び出しが上限 ${maxLanguageModelToolRounds} 回を超えたため中断しました`,
+      )
+    }
+
+    const toolResults = await invokeLanguageModelTools(toolCalls, tools, toolContext, token)
+    messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts))
+    messages.push(vscode.LanguageModelChatMessage.User(toolResults))
+  }
+
+  throw new Error(`${toolContext.label}: ツール呼び出しループの継続上限に達しました`)
+}
+
+function shouldLogLanguageModelToolCallCount(label: string): boolean {
+  return /Reviewer|Examiner|Rebuttal/.test(label)
+}
+
+async function sendLanguageModelRequest(
+  model: vscode.LanguageModelChat,
+  messages: vscode.LanguageModelChatMessage[],
+  tools: ArgosLanguageModelToolDefinition[],
+  token: vscode.CancellationToken,
+  output: vscode.OutputChannel,
+  label: string,
+  startedAt: number,
+): Promise<vscode.LanguageModelChatResponse> {
   const requestHeartbeat = setInterval(() => {
     logProgress(output, `${label}: モデル応答待機中 (${formatElapsed(startedAt)})`)
   }, 15_000)
 
   try {
-    response = await model.sendRequest(
-      [preparedInput.message],
+    return await model.sendRequest(
+      messages,
       {
         justification:
           'ARGOS 自動レビューで reviewer / consolidator / examiner / rebuttal を実行するために利用します。',
+        tools: tools.length > 0 ? tools.map(tool => tool.tool) : undefined,
+        toolMode: tools.length > 0 ? vscode.LanguageModelChatToolMode.Auto : undefined,
       },
       token,
     )
   } finally {
     clearInterval(requestHeartbeat)
   }
+}
 
+async function consumeLanguageModelResponse(
+  response: vscode.LanguageModelChatResponse,
+  output: vscode.OutputChannel,
+  label: string,
+  startedAt: number,
+): Promise<{
+  text: string
+  assistantParts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart | vscode.LanguageModelDataPart>
+  toolCalls: vscode.LanguageModelToolCallPart[]
+}> {
   logProgress(output, `${label}: 応答ストリームを受信開始 (${formatElapsed(startedAt)})`)
 
   let text = ''
   let lastLoggedAt = Date.now()
   let lastLoggedLength = 0
+  const assistantParts: Array<
+    vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart | vscode.LanguageModelDataPart
+  > = []
+  const toolCalls: vscode.LanguageModelToolCallPart[] = []
   const streamHeartbeat = setInterval(() => {
     logProgress(output, `${label}: 応答受信中 ${formatCount(text.length)} chars (${formatElapsed(startedAt)})`)
   }, 15_000)
 
   try {
-    for await (const fragment of response.text) {
-      text += fragment
-      const now = Date.now()
-      if (text.length - lastLoggedLength >= 4_000 || now - lastLoggedAt >= 5_000) {
-        logProgress(output, `${label}: 応答受信中 ${formatCount(text.length)} chars (${formatElapsed(startedAt)})`)
-        lastLoggedAt = now
-        lastLoggedLength = text.length
+    for await (const chunk of response.stream) {
+      if (chunk instanceof vscode.LanguageModelTextPart) {
+        text += chunk.value
+        assistantParts.push(new vscode.LanguageModelTextPart(chunk.value))
+        const now = Date.now()
+        if (text.length - lastLoggedLength >= 4_000 || now - lastLoggedAt >= 5_000) {
+          logProgress(output, `${label}: 応答受信中 ${formatCount(text.length)} chars (${formatElapsed(startedAt)})`)
+          lastLoggedAt = now
+          lastLoggedLength = text.length
+        }
+        continue
+      }
+
+      if (chunk instanceof vscode.LanguageModelToolCallPart) {
+        assistantParts.push(new vscode.LanguageModelToolCallPart(chunk.callId, chunk.name, chunk.input))
+        toolCalls.push(chunk)
+        logProgress(output, `${label}: ツール呼び出し要求 ${chunk.name} を受信しました`)
+        continue
+      }
+
+      if (chunk instanceof vscode.LanguageModelDataPart) {
+        assistantParts.push(chunk)
       }
     }
   } finally {
     clearInterval(streamHeartbeat)
   }
 
-  logProgress(output, `${label}: 応答受信完了 ${formatCount(text.length)} chars (${formatElapsed(startedAt)})`)
-  return text
+  return { text, assistantParts, toolCalls }
+}
+
+async function invokeLanguageModelTools(
+  toolCalls: readonly vscode.LanguageModelToolCallPart[],
+  tools: readonly ArgosLanguageModelToolDefinition[],
+  context: ArgosToolInvocationContext,
+  token: vscode.CancellationToken,
+): Promise<vscode.LanguageModelToolResultPart[]> {
+  const toolByName = new Map(tools.map(tool => [tool.tool.name, tool]))
+  const results: vscode.LanguageModelToolResultPart[] = []
+
+  for (const toolCall of toolCalls) {
+    throwIfCancelled(token)
+    const tool = toolByName.get(toolCall.name)
+    let result: vscode.LanguageModelToolResult
+
+    if (!tool) {
+      result = buildLanguageModelToolTextResult(`Tool not found: ${toolCall.name}`)
+    } else {
+      try {
+        logStep(context.output, `${context.label}: ${toolCall.name} を実行します`)
+        result = await tool.invoke(toolCall.input, context, token)
+      } catch (error) {
+        if (token.isCancellationRequested) {
+          throw error
+        }
+        result = buildLanguageModelToolTextResult(`${toolCall.name} failed: ${formatError(error)}`)
+      }
+    }
+
+    results.push(new vscode.LanguageModelToolResultPart(toolCall.callId, clipToolResultContent(result.content)))
+  }
+
+  return results
+}
+
+async function readFileTool(
+  toolInput: unknown,
+  context: ArgosToolInvocationContext,
+  token: vscode.CancellationToken,
+): Promise<vscode.LanguageModelToolResult> {
+  const { path: filePath, startLine, endLine } = parseReadFileToolInput(toolInput)
+  const normalizedPath = normalizeWorkspacePath(context.repositoryRoot, filePath)
+  if (!normalizedPath) {
+    return buildLanguageModelToolTextResult('Invalid path. Use a repository-relative file path.')
+  }
+  if (!shouldReadTextFile(normalizedPath)) {
+    return buildLanguageModelToolTextResult(`Only text files can be read: ${normalizedPath}`)
+  }
+
+  const fullPath = path.resolve(context.repositoryRoot, normalizedPath)
+  try {
+    const stats = await fs.stat(fullPath)
+    if (!stats.isFile()) {
+      return buildLanguageModelToolTextResult(`Not a file: ${normalizedPath}`)
+    }
+
+    throwIfCancelled(token)
+    const content = await fs.readFile(fullPath, 'utf8')
+    const lines = content.split(/\r?\n/)
+    const safeStartLine = clampToolLineNumber(startLine ?? 1, lines.length)
+    const requestedEndLine = clampToolLineNumber(endLine ?? safeStartLine + maxLanguageModelReadLines - 1, lines.length)
+    const safeEndLine = Math.min(lines.length, Math.max(safeStartLine, requestedEndLine))
+    const clippedEndLine = Math.min(safeEndLine, safeStartLine + maxLanguageModelReadLines - 1)
+    const snippet = lines
+      .slice(safeStartLine - 1, clippedEndLine)
+      .map((line, index) => `${String(safeStartLine + index).padStart(String(clippedEndLine).length, ' ')}: ${line}`)
+      .join('\n')
+    const truncated = clippedEndLine < safeEndLine || clippedEndLine < lines.length
+    const suffix = truncated ? '\n...[truncated]' : ''
+    return buildLanguageModelToolTextResult(
+      `File: ${normalizedPath}\nLines: ${safeStartLine}-${clippedEndLine} / ${lines.length}\n\n${snippet}${suffix}`,
+    )
+  } catch (error) {
+    return buildLanguageModelToolTextResult(`Failed to read ${normalizedPath}: ${formatError(error)}`)
+  }
+}
+
+async function searchTextTool(
+  toolInput: unknown,
+  context: ArgosToolInvocationContext,
+  token: vscode.CancellationToken,
+): Promise<vscode.LanguageModelToolResult> {
+  const { query, maxResults } = parseSearchTextToolInput(toolInput)
+  const safeQuery = query.trim()
+  if (!safeQuery) {
+    return buildLanguageModelToolTextResult('Search query must be a non-empty string.')
+  }
+
+  throwIfCancelled(token)
+  const output = await runGitOrEmpty(context.repositoryRoot, [
+    'grep',
+    '-nI',
+    '--full-name',
+    '-F',
+    '-e',
+    safeQuery,
+    '--',
+  ])
+  const matches = output
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(Boolean)
+  if (matches.length === 0) {
+    return buildLanguageModelToolTextResult(`No matches found for: ${safeQuery}`)
+  }
+
+  const limitedMatches = matches.slice(
+    0,
+    Math.max(1, Math.min(maxResults ?? maxLanguageModelSearchResults, maxLanguageModelSearchResults)),
+  )
+  const summary = [
+    `Search query: ${safeQuery}`,
+    `Matches: ${limitedMatches.length}${matches.length > limitedMatches.length ? ` / ${matches.length}` : ''}`,
+    '',
+    ...limitedMatches.map(match => `- ${clipLineText(match, 300)}`),
+  ].join('\n')
+  return buildLanguageModelToolTextResult(summary)
+}
+
+function parseReadFileToolInput(value: unknown): ArgosReadFileToolInput {
+  if (!value || typeof value !== 'object') {
+    throw new Error('read_file input must be an object')
+  }
+
+  const record = value as Record<string, unknown>
+  if (typeof record.path !== 'string' || !record.path.trim()) {
+    throw new Error('read_file.path must be a non-empty string')
+  }
+
+  return {
+    path: record.path.trim(),
+    startLine: parseOptionalToolInteger(record.startLine, 'read_file.startLine'),
+    endLine: parseOptionalToolInteger(record.endLine, 'read_file.endLine'),
+  }
+}
+
+function parseSearchTextToolInput(value: unknown): ArgosSearchTextToolInput {
+  if (!value || typeof value !== 'object') {
+    throw new Error('search_text input must be an object')
+  }
+
+  const record = value as Record<string, unknown>
+  if (typeof record.query !== 'string' || !record.query.trim()) {
+    throw new Error('search_text.query must be a non-empty string')
+  }
+
+  return {
+    query: record.query.trim(),
+    maxResults: parseOptionalToolInteger(record.maxResults, 'search_text.maxResults'),
+  }
+}
+
+function parseOptionalToolInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number when provided`)
+  }
+  return Math.max(1, Math.floor(value))
+}
+
+function clampToolLineNumber(value: number, totalLines: number): number {
+  return Math.max(1, Math.min(Math.max(totalLines, 1), Math.floor(value)))
+}
+
+function buildLanguageModelToolTextResult(text: string): vscode.LanguageModelToolResult {
+  return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(clipToolText(text))])
+}
+
+function clipToolResultContent(
+  content: Array<
+    vscode.LanguageModelTextPart | vscode.LanguageModelPromptTsxPart | vscode.LanguageModelDataPart | unknown
+  >,
+): Array<vscode.LanguageModelTextPart | vscode.LanguageModelPromptTsxPart | vscode.LanguageModelDataPart | unknown> {
+  const cloned = [...content]
+  const firstTextIndex = cloned.findIndex(part => part instanceof vscode.LanguageModelTextPart)
+  if (firstTextIndex < 0) {
+    return cloned
+  }
+
+  const textPart = cloned[firstTextIndex]
+  if (!(textPart instanceof vscode.LanguageModelTextPart)) {
+    return cloned
+  }
+  cloned[firstTextIndex] = new vscode.LanguageModelTextPart(clipToolText(textPart.value))
+  return cloned
+}
+
+function clipToolText(text: string): string {
+  return text.length > maxLanguageModelToolOutputChars
+    ? `${text.slice(0, maxLanguageModelToolOutputChars)}\n...[truncated]`
+    : text
+}
+
+function clipLineText(text: string, maxChars: number): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text
 }
 
 async function prepareLanguageModelInput(
@@ -2672,6 +3172,18 @@ function decodeBase64(value: string): Uint8Array {
 function supportsImageInput(model: vscode.LanguageModelChat): boolean {
   const capabilities = (model as vscode.LanguageModelChat & { capabilities?: { imageInput?: boolean } }).capabilities
   return capabilities?.imageInput !== false
+}
+
+function toolCallingBudget(model: vscode.LanguageModelChat): number {
+  const capabilities = (model as vscode.LanguageModelChat & { capabilities?: { toolCalling?: boolean | number } })
+    .capabilities
+  if (capabilities?.toolCalling === false || capabilities?.toolCalling === undefined) {
+    return 0
+  }
+  if (typeof capabilities?.toolCalling === 'number') {
+    return Math.max(0, Math.floor(capabilities.toolCalling))
+  }
+  return Number.POSITIVE_INFINITY
 }
 
 function stripJsonFence(text: string): string {
@@ -3127,7 +3639,7 @@ function createLocalId(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 16)}`
 }
 
-function nextActionAfterExaminer(round: number, judgment: FinalJudgment): NextAction {
+function nextActionAfterExaminer(round: number, judgment: FinalJudgment, maxRounds: number): NextAction {
   if (judgment === 'OK') {
     return {
       agent: null,
@@ -3138,7 +3650,7 @@ function nextActionAfterExaminer(round: number, judgment: FinalJudgment): NextAc
     }
   }
 
-  if (round >= 3) {
+  if (round >= maxRounds) {
     return {
       agent: null,
       round,
@@ -3823,6 +4335,22 @@ function throwIfCancelled(token: vscode.CancellationToken): void {
   }
 }
 
+function delay(ms: number, token: vscode.CancellationToken): Promise<void> {
+  throwIfCancelled(token)
+  return new Promise((resolve, reject) => {
+    let subscription: vscode.Disposable | undefined
+    const timeout = setTimeout(() => {
+      subscription?.dispose()
+      resolve()
+    }, ms)
+    subscription = token.onCancellationRequested(() => {
+      clearTimeout(timeout)
+      subscription?.dispose()
+      reject(new Error('キャンセルされました'))
+    })
+  })
+}
+
 function logStep(output: vscode.OutputChannel, message: string): void {
   output.appendLine(`[STEP] ${message}`)
 }
@@ -3835,11 +4363,44 @@ function logProgress(output: vscode.OutputChannel, message: string): void {
   output.appendLine(`[PROGRESS] ${message}`)
 }
 
+function logRetryExhaustedReviewInput(
+  output: vscode.OutputChannel,
+  workspaceFolder: vscode.WorkspaceFolder,
+  reviewForm: ReviewFormResult,
+): void {
+  const { models, purpose, attachments, maxRounds } = reviewForm
+  output.appendLine('[INPUT] Copilot 応答取得のリトライがすべて失敗しました。再実行用にフォーム入力を記録します。')
+  output.appendLine(`[INPUT] Workspace: ${workspaceFolder.uri.fsPath}`)
+  output.appendLine(`[INPUT] Max discussion rounds: ${maxRounds}`)
+  output.appendLine(`[INPUT] Reviewer model: ${modelNameForStorage(models.reviewer)}`)
+  if (models.reviewer2) {
+    output.appendLine(`[INPUT] Reviewer 2 model: ${modelNameForStorage(models.reviewer2)}`)
+  }
+  if (models.consolidator) {
+    output.appendLine(`[INPUT] Consolidator model: ${modelNameForStorage(models.consolidator)}`)
+  }
+  output.appendLine(`[INPUT] Examiner model: ${modelNameForStorage(models.examiner)}`)
+  output.appendLine(`[INPUT] Rebuttal model: ${modelNameForStorage(models.rebuttal)}`)
+  output.appendLine('[INPUT] Review requirements begin')
+  for (const line of purpose.split(/\r?\n/)) {
+    output.appendLine(`[INPUT] ${line}`)
+  }
+  output.appendLine('[INPUT] Review requirements end')
+  output.appendLine(`[INPUT] Attachments: ${attachments.length}`)
+  for (const attachment of attachments) {
+    output.appendLine(`[INPUT] - ${attachment.name} (${attachment.kind}, ${attachment.mimeType})`)
+  }
+}
+
 function formatElapsed(startedAt: number): string {
   const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
   const minutes = Math.floor(elapsedSeconds / 60)
   const seconds = elapsedSeconds % 60
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`
+}
+
+function formatDuration(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`
 }
 
 function formatCount(value: number): string {

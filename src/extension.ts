@@ -523,10 +523,15 @@ const modelCostLabelRules: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /gemini[\s._-]*2[\s._-]*5[\s._-]*pro\b/i, label: '中コスト' },
   { pattern: /gemini[\s._-]*3(?![\s._-]*\d)(?:[\s._-]*flash|\s+flash)\b/i, label: '低コスト' },
   { pattern: /gpt[\s._-]*5[\s._-]*5\b/i, label: '高コスト' },
+  { pattern: /gpt[\s._-]*5[\s._-]*6[\s._-]*luna\b/i, label: '低コスト' },
+  { pattern: /gpt[\s._-]*5[\s._-]*6[\s._-]*sol\b/i, label: '高コスト' },
+  { pattern: /gpt[\s._-]*5[\s._-]*6[\s._-]*terra\b/i, label: '中コスト' },
   { pattern: /gpt[\s._-]*5[\s._-]*4[\s._-]*mini\b/i, label: '低コスト' },
   { pattern: /gpt[\s._-]*5(?![\s._-]*\d)[\s._-]+mini\b/i, label: '低コスト' },
   { pattern: /gpt[\s._-]*5[\s._-]*4\b/i, label: '中コスト' },
   { pattern: /gpt[\s._-]*5[\s._-]*3[\s._-]*codex\b/i, label: '中コスト' },
+  { pattern: /kimi[\s._-]*k2[\s._-]*7[\s._-]*code\b/i, label: '低コスト' },
+  { pattern: /mai[\s._-]*code[\s._-]*1[\s._-]*flash\b/i, label: '低コスト' },
 ]
 
 export function activate(context: vscode.ExtensionContext): void {

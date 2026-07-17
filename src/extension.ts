@@ -308,9 +308,11 @@ const textEncoder = new TextEncoder()
 const maxImageAttachments = 5
 const maxTotalAttachments = 10
 const maxDiscussionRounds = 3
-const defaultDiscussionRounds = 3
+const defaultDiscussionRounds = 2
 const languageModelRetryDelayMs = 2_000
-const maxLanguageModelToolRounds = 6
+const defaultLanguageModelToolRounds = 6
+const discussionLanguageModelToolRounds = 8
+const discussionInvestigationRetryAttempts = 1
 const maxLanguageModelReadLines = 240
 const maxLanguageModelSearchResults = 20
 const maxLanguageModelToolOutputChars = 20_000
@@ -2753,14 +2755,26 @@ async function callLanguageModel<T>(
   const languageModelRetryAttempts = vscode.workspace
     .getConfiguration('argos')
     .get<number>('languageModelRetryAttempts', 2)
-  const maxAttempts = languageModelRetryAttempts + 1
+  const maxInvestigationRetryAttempts = investigationToolRetryBudget(label)
+  const maxAttempts = languageModelRetryAttempts + 1 + maxInvestigationRetryAttempts
+  let remainingLanguageModelFailureRetries = languageModelRetryAttempts
+  let investigationRetryUsed = false
   let lastError: unknown
   let lastParseError: unknown
+  let investigationToolRetryRequested = false
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const attemptLabel = maxAttempts > 1 ? `${label} (試行 ${attempt}/${maxAttempts})` : label
-    const attemptMessages = buildLanguageModelAttemptMessages(preparedInput, lastParseError)
-    const inputMode = lastParseError ? `${preparedInput.mode}, JSON retry reminder` : preparedInput.mode
+    const attemptMessages = buildLanguageModelAttemptMessages(
+      preparedInput,
+      lastParseError,
+      investigationToolRetryRequested,
+    )
+    const inputMode = lastParseError
+      ? `${preparedInput.mode}, JSON retry reminder`
+      : investigationToolRetryRequested
+        ? `${preparedInput.mode}, tool-use retry reminder`
+        : preparedInput.mode
     const promptText = formatLanguageModelMessagesForDebug(attemptMessages)
     logProgress(
       output,
@@ -2791,6 +2805,7 @@ async function callLanguageModel<T>(
       if (parseResponse) {
         try {
           const parsed = parseResponse(result.text, { label: attemptLabel, output })
+          const parsedContent = extractParsedMarkdownContent(parsed) ?? result.text
           await debugLogger?.recordAttempt({
             label,
             attempt,
@@ -2806,6 +2821,26 @@ async function callLanguageModel<T>(
             status: 'parsed',
             parsed,
           })
+
+          if (
+            shouldRetryForInvestigationToolUse({
+              label,
+              content: parsedContent,
+              toolCallCount: result.toolCallCount,
+              toolsAvailable: tools.length > 0,
+              alreadyRetried: investigationRetryUsed,
+            })
+          ) {
+            investigationRetryUsed = true
+            investigationToolRetryRequested = true
+            lastParseError = undefined
+            logProgress(
+              output,
+              `${label}: 検索で確認可能な未確認事項が残っていますがツール呼び出しが 0 件だったため、ツール利用を明示してリトライします`,
+            )
+            continue
+          }
+
           return parsed
         } catch (error) {
           if (token.isCancellationRequested) {
@@ -2814,6 +2849,7 @@ async function callLanguageModel<T>(
 
           lastError = error
           lastParseError = error
+          investigationToolRetryRequested = false
           await debugLogger?.recordAttempt({
             label,
             attempt,
@@ -2829,7 +2865,8 @@ async function callLanguageModel<T>(
             status: 'parse-error',
             parseError: formatError(error),
           })
-          if (attempt < maxAttempts) {
+          if (remainingLanguageModelFailureRetries > 0) {
+            remainingLanguageModelFailureRetries -= 1
             logProgress(
               output,
               `${label}: Copilot 応答を JSON として解釈できませんでした (${formatError(error)})。${formatDuration(languageModelRetryDelayMs)} 後に出力形式を再指定してリトライします (${attempt}/${languageModelRetryAttempts})`,
@@ -2863,6 +2900,7 @@ async function callLanguageModel<T>(
       }
 
       lastError = error
+      investigationToolRetryRequested = false
       if (error !== lastParseError) {
         await debugLogger?.recordAttempt({
           label,
@@ -2880,7 +2918,8 @@ async function callLanguageModel<T>(
           parseError: formatError(error),
         })
       }
-      if (attempt < maxAttempts) {
+      if (remainingLanguageModelFailureRetries > 0) {
+        remainingLanguageModelFailureRetries -= 1
         logProgress(
           output,
           `${label}: Copilot 応答取得に失敗しました (${formatError(error)})。${formatDuration(languageModelRetryDelayMs)} 後にリトライします (${attempt}/${languageModelRetryAttempts})`,
@@ -2888,6 +2927,8 @@ async function callLanguageModel<T>(
         await delay(languageModelRetryDelayMs, token)
         continue
       }
+
+      throw error
     }
   }
 
@@ -2897,15 +2938,20 @@ async function callLanguageModel<T>(
 function buildLanguageModelAttemptMessages(
   preparedInput: MeasuredPromptCandidate,
   lastParseError: unknown,
+  investigationToolRetryRequested: boolean,
 ): vscode.LanguageModelChatMessage[] {
-  if (!lastParseError) {
+  if (!lastParseError && !investigationToolRetryRequested) {
     return [preparedInput.message]
   }
+
+  const retryInstruction = lastParseError
+    ? formatJsonRetryInstruction(lastParseError)
+    : investigationToolRetryInstruction
 
   return [
     new vscode.LanguageModelChatMessage(
       preparedInput.message.role,
-      [...preparedInput.message.content, new vscode.LanguageModelTextPart(formatJsonRetryInstruction(lastParseError))],
+      [...preparedInput.message.content, new vscode.LanguageModelTextPart(retryInstruction)],
       preparedInput.message.name,
     ),
   ]
@@ -2913,6 +2959,65 @@ function buildLanguageModelAttemptMessages(
 
 function formatJsonRetryInstruction(error: unknown): string {
   return `${jsonRetryInstruction}\nパースエラー: ${formatError(error)}`
+}
+
+const investigationToolRetryInstruction = `
+
+---
+
+重要: 直前の応答には、リポジトリ検索で確認可能な未確認事項が残っていますが、ツール呼び出しが 0 件でした。最終応答を出す前に、該当するシンボル名・コンポーネント名・slot 名・prop 名・関数名・設定キーを \`argos_search_text\` で検索し、必要なら \`argos_read_file\` で周辺を確認してください。検索しても判断できない場合だけ、その理由を明記して未確認として残してください。最終応答は必ず ARGOS_JSON_START と ARGOS_JSON_END の間に JSON オブジェクトだけを 1 個入れ、Markdown フェンスや前置き、後書きは付けないでください。`.trim()
+
+interface InvestigationToolRetryInput {
+  label: string
+  content: string
+  toolCallCount: number
+  toolsAvailable: boolean
+  alreadyRetried: boolean
+}
+
+function investigationToolRetryBudget(label: string): number {
+  return isDiscussionInvestigationLabel(label) ? discussionInvestigationRetryAttempts : 0
+}
+
+function shouldRetryForInvestigationToolUse(input: InvestigationToolRetryInput): boolean {
+  if (
+    input.alreadyRetried ||
+    !input.toolsAvailable ||
+    input.toolCallCount > 0 ||
+    !isDiscussionInvestigationLabel(input.label)
+  ) {
+    return false
+  }
+
+  return containsSearchableUnresolvedInvestigation(input.content)
+}
+
+function isDiscussionInvestigationLabel(label: string): boolean {
+  return /Examiner|Rebuttal/.test(label)
+}
+
+function extractParsedMarkdownContent(value: unknown): string | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+
+  const content = (value as { content?: unknown }).content
+  return typeof content === 'string' && content.trim() ? content : null
+}
+
+function containsSearchableUnresolvedInvestigation(content: string): boolean {
+  const normalized = content.replace(/\r\n?/g, '\n')
+  const searchablePatterns = [
+    /grep\s*(?:すれば|で|を|検索|確認)/i,
+    /検索(?:すれば|で|して|し|可能|結果|全件)/,
+    /全件確認/,
+    /(?:利用箇所|呼び出し元|caller|参照箇所|残存参照|未更新\s*caller|旧\s*slot|slot\s*caller)/i,
+    /差分外[\s\S]{0,120}(?:未確認|確認不能|残存|残って|存在)/,
+    /未確認[\s\S]{0,120}(?:caller|利用箇所|呼び出し元|参照|slot|prop|コンポーネント|シンボル|関数|設定キー)/i,
+    /反証可能/,
+    /^-\s*追加確認事項\s*[:：]\s*(?!なし\b).+/m,
+  ]
+  return searchablePatterns.some(pattern => pattern.test(normalized))
 }
 
 function createLanguageModelTools(model: vscode.LanguageModelChat): ArgosLanguageModelToolDefinition[] {
@@ -2976,8 +3081,9 @@ async function completeLanguageModelTurn(
   const messages = [...initialMessages]
   let toolCallCount = 0
   const toolDebugEvents: ModelDebugToolCall[] = []
+  const maxToolRounds = maxToolRoundsForLabel(toolContext.label)
 
-  for (let round = 0; round <= maxLanguageModelToolRounds; round += 1) {
+  for (let round = 0; round <= maxToolRounds; round += 1) {
     const response = await sendLanguageModelRequest(
       model,
       messages,
@@ -3000,10 +3106,8 @@ async function completeLanguageModelTurn(
 
     toolCallCount += toolCalls.length
 
-    if (round === maxLanguageModelToolRounds) {
-      throw new Error(
-        `${toolContext.label}: ツール呼び出しが上限 ${maxLanguageModelToolRounds} 回を超えたため中断しました`,
-      )
+    if (round === maxToolRounds) {
+      throw new Error(`${toolContext.label}: ツール呼び出しが上限 ${maxToolRounds} 回を超えたため中断しました`)
     }
 
     const { resultParts, debugEvents } = await invokeLanguageModelTools(toolCalls, tools, toolContext, token)
@@ -3017,6 +3121,10 @@ async function completeLanguageModelTurn(
 
 function shouldLogLanguageModelToolCallCount(label: string): boolean {
   return /Reviewer|Examiner|Rebuttal/.test(label)
+}
+
+function maxToolRoundsForLabel(label: string): number {
+  return /Examiner|Rebuttal/.test(label) ? discussionLanguageModelToolRounds : defaultLanguageModelToolRounds
 }
 
 async function sendLanguageModelRequest(

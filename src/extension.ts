@@ -2329,11 +2329,22 @@ async function readContextFile(
     }
 
     const content = await fs.readFile(fullPath, 'utf8')
-    const clipped = content.length > remainingBudget ? `${content.slice(0, remainingBudget)}\n...[truncated]` : content
+    const lines = content.split(/\r?\n/)
+    const numberedContent = formatNumberedLines(lines)
+    const clipped =
+      numberedContent.length > remainingBudget
+        ? `${numberedContent.slice(0, remainingBudget)}\n...[truncated]`
+        : numberedContent
     return `### ${relativePath}\n\n\`\`\`\n${clipped}\n\`\`\``
   } catch {
     return null
   }
+}
+
+function formatNumberedLines(lines: readonly string[], startLine = 1): string {
+  const endLine = startLine + lines.length - 1
+  const width = String(Math.max(endLine, 1)).length
+  return lines.map((line, index) => `${String(startLine + index).padStart(width, ' ')}: ${line}`).join('\n')
 }
 
 function buildPrompt(systemPrompt: string, userPrompt: string): string {
@@ -3288,10 +3299,7 @@ async function readFileTool(
     const requestedEndLine = clampToolLineNumber(endLine ?? safeStartLine + maxLanguageModelReadLines - 1, lines.length)
     const safeEndLine = Math.min(lines.length, Math.max(safeStartLine, requestedEndLine))
     const clippedEndLine = Math.min(safeEndLine, safeStartLine + maxLanguageModelReadLines - 1)
-    const snippet = lines
-      .slice(safeStartLine - 1, clippedEndLine)
-      .map((line, index) => `${String(safeStartLine + index).padStart(String(clippedEndLine).length, ' ')}: ${line}`)
-      .join('\n')
+    const snippet = formatNumberedLines(lines.slice(safeStartLine - 1, clippedEndLine), safeStartLine)
     const truncated = clippedEndLine < safeEndLine || clippedEndLine < lines.length
     const suffix = truncated ? '\n...[truncated]' : ''
     return buildLanguageModelToolTextResult(

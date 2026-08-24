@@ -305,7 +305,7 @@ interface ReviewReport {
 const execFileAsync = promisify(execFile)
 const textDecoder = new TextDecoder('utf8')
 const textEncoder = new TextEncoder()
-const maxImageAttachments = 5
+const maxImageAttachments = 10
 const maxTotalAttachments = 10
 const maxDiscussionRounds = 3
 const defaultDiscussionRounds = 2

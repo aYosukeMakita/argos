@@ -147,6 +147,7 @@ interface RunInput {
   repositoryRoot: string
   diffPatch: string
   codeContext?: string
+  callSiteIndex?: string
   attachments: ReviewAttachment[]
   reviewId?: string
   sessionId?: string
@@ -311,8 +312,14 @@ const maxDiscussionRounds = 3
 const defaultDiscussionRounds = 2
 const languageModelRetryDelayMs = 2_000
 const defaultLanguageModelToolRounds = 6
+const reviewerLanguageModelToolRounds = 10
 const discussionLanguageModelToolRounds = 8
 const discussionInvestigationRetryAttempts = 1
+const reviewerInvestigationRetryAttempts = 1
+const maxCallSiteSymbols = 20
+const maxCallSiteMatchesPerSymbol = 12
+const maxCallSiteIndexChars = 40_000
+const callSiteIndexBudgetRatio = 0.2
 const maxLanguageModelReadLines = 240
 const maxLanguageModelSearchResults = 20
 const maxLanguageModelToolOutputChars = 20_000
@@ -518,6 +525,7 @@ const modelCostLabelRules: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /claude[\s._-]*opus\b/i, label: '高コスト' },
   { pattern: /claude[\s._-]*sonnet\b/i, label: '中コスト' },
   { pattern: /claude[\s._-]*haiku\b/i, label: '低コスト' },
+  { pattern: /gemini[\s._-]*4[\s._-]*argon\b/i, label: '中コスト' },
   { pattern: /gemini[\s._-]*3[\s._-]*1[\s._-]*pro\b/i, label: '中コスト' },
   { pattern: /gemini[\s._-]*3[\s._-]*5[\s._-]*flash\b/i, label: '中コスト' },
   { pattern: /gemini[\s._-]*2[\s._-]*5[\s._-]*pro\b/i, label: '中コスト' },
@@ -611,6 +619,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
         logStep(output, `Diff range: ${collected.diffRange}`)
         logStep(output, `Diff: ${collected.diffPatch.length} chars`)
         logStep(output, `Context: ${collected.codeContext?.length ?? 0} chars`)
+        logStep(output, `Call-site index: ${collected.callSiteIndex?.length ?? 0} chars`)
         logStep(output, `Attachments: ${attachments.length}`)
 
         const input: RunInput = {
@@ -618,6 +627,7 @@ async function startAutoReview(context: vscode.ExtensionContext, output: vscode.
           repositoryRoot: collected.repositoryRoot,
           diffPatch: collected.diffPatch,
           codeContext: collected.codeContext,
+          callSiteIndex: collected.callSiteIndex,
           attachments,
         }
         const reviewId = createLocalId('review')
@@ -2105,7 +2115,13 @@ async function collectReviewInput(
   workspaceRoot: string,
   settings: ExtensionSettings,
   attachments: ReviewAttachment[],
-): Promise<{ repositoryRoot: string; diffRange: string; diffPatch: string; codeContext?: string }> {
+): Promise<{
+  repositoryRoot: string
+  diffRange: string
+  diffPatch: string
+  codeContext?: string
+  callSiteIndex?: string
+}> {
   const repositoryRoot = await resolveRepositoryRoot(workspaceRoot)
   const baseBranch = await inferReviewBaseBranch(repositoryRoot)
   const diffSource = await resolveReviewDiffSource(repositoryRoot, baseBranch, settings.includeUncommittedChanges)
@@ -2117,11 +2133,25 @@ async function collectReviewInput(
     throw new Error(`レビュー対象の Git 変更差分が見つかりませんでした (${diffSource.label})`)
   }
 
+  // The call-site index is carved out of contextBudget so the total context size does not grow.
+  const callSiteIndex = settings.includeContext
+    ? await buildCallSiteIndex(
+        repositoryRoot,
+        diffPatch,
+        Math.min(maxCallSiteIndexChars, Math.floor(Math.max(0, settings.contextBudget) * callSiteIndexBudgetRatio)),
+      )
+    : ''
   const codeContext = settings.includeContext
-    ? await buildCodeContext(repositoryRoot, diffPatch, settings.contextBudget)
+    ? await buildCodeContext(repositoryRoot, diffPatch, settings.contextBudget - callSiteIndex.length)
     : undefined
 
-  return { repositoryRoot, diffRange: diffSource.label, diffPatch, codeContext: codeContext || undefined }
+  return {
+    repositoryRoot,
+    diffRange: diffSource.label,
+    diffPatch,
+    codeContext: codeContext || undefined,
+    callSiteIndex: callSiteIndex || undefined,
+  }
 }
 
 async function resolveReviewDiffSource(
@@ -2319,6 +2349,114 @@ async function buildCodeContext(workspaceRoot: string, diffPatch: string, budget
   return blocks.join('\n\n---\n\n')
 }
 
+const symbolDeclarationPatterns = [
+  /\b(?:function|class|interface|type|enum|def|fn|func|struct|trait|record)\s+\*?\s*([A-Za-z_$][\w$]*)/g,
+  /^(?:export\s+)?(?:default\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g,
+  /^\s*(?:(?:public|private|protected|static|async|override|readonly|get|set)\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^{=]*)?\{/g,
+]
+
+const nonSymbolKeywords = new Set([
+  'if',
+  'for',
+  'while',
+  'switch',
+  'catch',
+  'return',
+  'function',
+  'constructor',
+  'super',
+  'this',
+  'new',
+  'await',
+  'typeof',
+  'with',
+  'else',
+  'elif',
+  'main',
+  'init',
+  'test',
+  'describe',
+  'it',
+])
+
+function extractChangedSymbols(diffPatch: string): string[] {
+  const declared: string[] = []
+  const enclosing: string[] = []
+  const collect = (text: string, target: string[]) => {
+    for (const pattern of symbolDeclarationPatterns) {
+      pattern.lastIndex = 0
+      let match: RegExpExecArray | null
+      while ((match = pattern.exec(text)) !== null) {
+        const symbol = match[1]
+        if (symbol.length >= 3 && !nonSymbolKeywords.has(symbol)) {
+          target.push(symbol)
+        }
+      }
+    }
+  }
+
+  for (const line of diffPatch.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      continue
+    }
+    if (line.startsWith('@@')) {
+      const hunkContext = line.match(/^@@[^@]*@@\s?(.*)$/)?.[1]
+      if (hunkContext) {
+        collect(hunkContext, enclosing)
+      }
+      continue
+    }
+    if (line.startsWith('+') || line.startsWith('-')) {
+      collect(line.slice(1), declared)
+    }
+  }
+
+  return [...new Set([...declared, ...enclosing])].slice(0, maxCallSiteSymbols)
+}
+
+async function buildCallSiteIndex(repositoryRoot: string, diffPatch: string, budget: number): Promise<string> {
+  const symbols = extractChangedSymbols(diffPatch)
+  if (symbols.length === 0 || budget <= 0) {
+    return ''
+  }
+
+  const changedPaths = new Set(parseDiffPaths(diffPatch, repositoryRoot))
+  const header = [
+    '### 変更シンボルの参照箇所インデックス',
+    '',
+    '差分で追加・変更・削除された宣言と、変更 hunk を含む関数の名前を `git grep -w` で機械抽出した一覧です。網羅性と正確性は保証されないため、判断に使う前に argos_search_text / argos_read_file で確認してください。',
+  ].join('\n')
+  const sections: string[] = []
+  let remaining = budget - header.length
+
+  for (const symbol of symbols) {
+    const output = await runGitOrEmpty(repositoryRoot, ['grep', '-nIw', '--full-name', '-F', '-e', symbol, '--'])
+    const matches = output
+      .split('\n')
+      .map(line => line.trimEnd())
+      .filter(Boolean)
+    if (matches.length === 0) {
+      continue
+    }
+
+    const outside = matches.filter(match => !changedPaths.has(match.match(/^(.*?):\d+:/)?.[1] ?? ''))
+    const shown = outside.slice(0, maxCallSiteMatchesPerSymbol)
+    const omitted = outside.length > shown.length ? `（先頭 ${shown.length} 件のみ表示）` : ''
+    const section = [
+      `#### ${symbol}`,
+      `差分外ファイルの参照: ${outside.length} 件${omitted} / 変更ファイル内の参照: ${matches.length - outside.length} 件`,
+      ...shown.map(match => `- ${clipLineText(match, 240)}`),
+    ].join('\n')
+    if (section.length > remaining) {
+      break
+    }
+    sections.push(section)
+    remaining -= section.length
+  }
+
+  return sections.length > 0 ? [header, ...sections].join('\n\n') : ''
+}
+
 async function readContextFile(
   workspaceRoot: string,
   relativePath: string,
@@ -2377,9 +2515,15 @@ function reviewerPromptRequest(systemPrompt: string, input: RunInput): PromptReq
   return {
     full: buildPromptCandidate(
       systemPrompt,
-      reviewerUserInput(input),
+      reviewerUserInput(input, 'full'),
       'full',
-      reviewerPromptBreakdown(systemPrompt, input),
+      reviewerPromptBreakdown(systemPrompt, input, 'full'),
+    ),
+    compact: buildPromptCandidate(
+      systemPrompt,
+      reviewerUserInput(input, 'compact'),
+      'compact',
+      reviewerPromptBreakdown(systemPrompt, input, 'compact'),
     ),
   }
 }
@@ -2396,16 +2540,16 @@ function discussionPromptRequest(
   return {
     full: buildPromptCandidate(
       systemPrompt,
-      discussionUserInput(input, fullDiscussion),
+      discussionUserInput(input, fullDiscussion, 'full'),
       'full',
-      discussionPromptBreakdown(systemPrompt, input, fullDiscussion, 'discussion'),
+      discussionPromptBreakdown(systemPrompt, input, fullDiscussion, 'discussion', 'full'),
       findingIds,
     ),
     compact: buildPromptCandidate(
       systemPrompt,
-      discussionUserInput(input, compactDiscussion),
+      discussionUserInput(input, compactDiscussion, 'compact'),
       'compact',
-      discussionPromptBreakdown(systemPrompt, input, compactDiscussion, 'compacted discussion'),
+      discussionPromptBreakdown(systemPrompt, input, compactDiscussion, 'compacted discussion', 'compact'),
       findingIds,
     ),
   }
@@ -2422,9 +2566,16 @@ function consolidatorPromptRequest(
   return {
     full: buildPromptCandidate(
       systemPrompt,
-      consolidatorUserInput(input, reviewerDiscussion),
+      consolidatorUserInput(input, reviewerDiscussion, 'full'),
       'full',
-      discussionPromptBreakdown(systemPrompt, input, reviewerDiscussion, 'reviewer findings'),
+      discussionPromptBreakdown(systemPrompt, input, reviewerDiscussion, 'reviewer findings', 'full'),
+      findingIds,
+    ),
+    compact: buildPromptCandidate(
+      systemPrompt,
+      consolidatorUserInput(input, reviewerDiscussion, 'compact'),
+      'compact',
+      discussionPromptBreakdown(systemPrompt, input, reviewerDiscussion, 'reviewer findings', 'compact'),
       findingIds,
     ),
   }
@@ -2458,16 +2609,16 @@ function conclusionPromptRequest(
   }
 }
 
-function reviewerUserInput(input: RunInput): string {
-  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\nリポジトリ:\n${input.repositoryRoot}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+function reviewerUserInput(input: RunInput, mode: PromptMode): string {
+  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\nリポジトリ:\n${input.repositoryRoot}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input, mode)}`
 }
 
-function discussionUserInput(input: RunInput, discussion: string): string {
-  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${discussion}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+function discussionUserInput(input: RunInput, discussion: string, mode: PromptMode): string {
+  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\nこれまでの会話:\n${discussion}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input, mode)}`
 }
 
-function consolidatorUserInput(input: RunInput, reviewerDiscussion: string): string {
-  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\n一次レビュー結果:\n${reviewerDiscussion}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input)}`
+function consolidatorUserInput(input: RunInput, reviewerDiscussion: string, mode: PromptMode): string {
+  return `${formatReviewRequirements(input)}${formatAttachmentSummary(input)}\n\n対象 review_id:\n${input.reviewId ?? 'unknown'}\n対象 session_id:\n${input.sessionId ?? 'unknown'}\n\n一次レビュー結果:\n${reviewerDiscussion}\n\n差分:\n\n${input.diffPatch}${formatCodeContext(input, mode)}`
 }
 
 function conclusionSystemPrompt(): string {
@@ -2560,8 +2711,19 @@ function formatAttachmentSummary(input: RunInput): string {
   return `\n\n添付資料:\n${lines.join('\n')}`
 }
 
-function formatCodeContext(input: RunInput): string {
-  return input.codeContext ? `\n\n関連コードコンテキスト:\n\n${input.codeContext}` : ''
+function formatCodeContext(input: RunInput, mode: PromptMode): string {
+  const parts: string[] = []
+  if (input.callSiteIndex) {
+    parts.push(input.callSiteIndex)
+  }
+  if (input.codeContext) {
+    parts.push(
+      mode === 'full'
+        ? input.codeContext
+        : '（入力サイズ制御のため、変更ファイル全文は省略しています。必要な箇所は argos_read_file で参照してください。）',
+    )
+  }
+  return parts.length > 0 ? `\n\n関連コードコンテキスト:\n\n${parts.join('\n\n---\n\n')}` : ''
 }
 
 function formatMessages(messages: DiscussionMessageRecord[]): string {
@@ -2695,12 +2857,12 @@ function extractFindingIds(text: string): string[] {
   return [...findingIds]
 }
 
-function reviewerPromptBreakdown(systemPrompt: string, input: RunInput): InputSizeBreakdownItem[] {
+function reviewerPromptBreakdown(systemPrompt: string, input: RunInput, mode: PromptMode): InputSizeBreakdownItem[] {
   return [
     ...commonPromptBreakdown(systemPrompt, input),
     { label: 'repository path', chars: input.repositoryRoot.length },
     { label: 'diff patch', chars: input.diffPatch.length },
-    { label: 'code context', chars: input.codeContext?.length ?? 0 },
+    { label: 'code context', chars: formatCodeContext(input, mode).length },
   ]
 }
 
@@ -2709,13 +2871,14 @@ function discussionPromptBreakdown(
   input: RunInput,
   discussion: string,
   discussionLabel: string,
+  mode: PromptMode,
 ): InputSizeBreakdownItem[] {
   return [
     ...commonPromptBreakdown(systemPrompt, input),
     { label: 'review/session ids', chars: `${input.reviewId ?? 'unknown'}${input.sessionId ?? 'unknown'}`.length },
     { label: discussionLabel, chars: discussion.length },
     { label: 'diff patch', chars: input.diffPatch.length },
-    { label: 'code context', chars: input.codeContext?.length ?? 0 },
+    { label: 'code context', chars: formatCodeContext(input, mode).length },
   ]
 }
 
@@ -2792,6 +2955,7 @@ async function callLanguageModel<T>(
       preparedInput,
       lastParseError,
       investigationToolRetryRequested,
+      label,
     )
     const inputMode = lastParseError
       ? `${preparedInput.mode}, JSON retry reminder`
@@ -2816,6 +2980,7 @@ async function callLanguageModel<T>(
         },
         token,
         startedAt,
+        preparedInput.tokenCount,
       )
       if (shouldLogLanguageModelToolCallCount(label)) {
         logArtifact(output, `${attemptLabel}: tool calls ${result.toolCallCount}`)
@@ -2859,7 +3024,9 @@ async function callLanguageModel<T>(
             lastParseError = undefined
             logProgress(
               output,
-              `${label}: 検索で確認可能な未確認事項が残っていますがツール呼び出しが 0 件だったため、ツール利用を明示してリトライします`,
+              isReviewerLabel(label)
+                ? `${label}: ツール呼び出しが 0 件で差分外の参照箇所を未確認のため、ツール利用を明示してリトライします`
+                : `${label}: 検索で確認可能な未確認事項が残っていますがツール呼び出しが 0 件だったため、ツール利用を明示してリトライします`,
             )
             continue
           }
@@ -2962,6 +3129,7 @@ function buildLanguageModelAttemptMessages(
   preparedInput: MeasuredPromptCandidate,
   lastParseError: unknown,
   investigationToolRetryRequested: boolean,
+  label: string,
 ): vscode.LanguageModelChatMessage[] {
   if (!lastParseError && !investigationToolRetryRequested) {
     return [preparedInput.message]
@@ -2969,7 +3137,9 @@ function buildLanguageModelAttemptMessages(
 
   const retryInstruction = lastParseError
     ? formatJsonRetryInstruction(lastParseError)
-    : investigationToolRetryInstruction
+    : isReviewerLabel(label)
+      ? reviewerToolRetryInstruction
+      : investigationToolRetryInstruction
 
   return [
     new vscode.LanguageModelChatMessage(
@@ -2998,21 +3168,35 @@ interface InvestigationToolRetryInput {
   alreadyRetried: boolean
 }
 
+const reviewerToolRetryInstruction = `
+
+---
+
+重要: 直前の応答はツール呼び出しが 0 件で、差分外の参照箇所を確認していません。最終応答を出す前に、変更・削除された関数・型・設定キー・プロパティのうち振る舞いや契約が変わったものを \`argos_search_text\` で検索し、差分外の呼び出し元・利用箇所を \`argos_read_file\` で確認してください。確認の結果、影響がないと判断できた場合はそのまま最終応答してください。最終応答は必ず ARGOS_JSON_START と ARGOS_JSON_END の間に JSON オブジェクトだけを 1 個入れ、Markdown フェンスや前置き、後書きは付けないでください。`.trim()
+
 function investigationToolRetryBudget(label: string): number {
+  if (isReviewerLabel(label)) {
+    return reviewerInvestigationRetryAttempts
+  }
   return isDiscussionInvestigationLabel(label) ? discussionInvestigationRetryAttempts : 0
 }
 
 function shouldRetryForInvestigationToolUse(input: InvestigationToolRetryInput): boolean {
-  if (
-    input.alreadyRetried ||
-    !input.toolsAvailable ||
-    input.toolCallCount > 0 ||
-    !isDiscussionInvestigationLabel(input.label)
-  ) {
+  if (input.alreadyRetried || !input.toolsAvailable || input.toolCallCount > 0) {
+    return false
+  }
+  if (isReviewerLabel(input.label)) {
+    return true
+  }
+  if (!isDiscussionInvestigationLabel(input.label)) {
     return false
   }
 
   return containsSearchableUnresolvedInvestigation(input.content)
+}
+
+function isReviewerLabel(label: string): boolean {
+  return /^Reviewer\b/.test(label)
 }
 
 function isDiscussionInvestigationLabel(label: string): boolean {
@@ -3100,13 +3284,19 @@ async function completeLanguageModelTurn(
   toolContext: ArgosToolInvocationContext,
   token: vscode.CancellationToken,
   startedAt: number,
+  initialTokenCount: number,
 ): Promise<{ text: string; toolCallCount: number; toolCalls: ModelDebugToolCall[] }> {
   const messages = [...initialMessages]
   let toolCallCount = 0
   const toolDebugEvents: ModelDebugToolCall[] = []
   const maxToolRounds = maxToolRoundsForLabel(toolContext.label)
+  const tokenLimit = compactionThresholdTokens(model)
+  let tokenCount = initialTokenCount
+  let toolBudgetExhausted = false
+  let toolRoundsExhausted = false
 
-  for (let round = 0; round <= maxToolRounds; round += 1) {
+  // One extra round lets the model answer after its tool results are withheld.
+  for (let round = 0; round <= maxToolRounds + 1; round += 1) {
     const response = await sendLanguageModelRequest(
       model,
       messages,
@@ -3129,17 +3319,112 @@ async function completeLanguageModelTurn(
 
     toolCallCount += toolCalls.length
 
-    if (round === maxToolRounds) {
-      throw new Error(`${toolContext.label}: ツール呼び出しが上限 ${maxToolRounds} 回を超えたため中断しました`)
+    if (round > maxToolRounds) {
+      throw new Error(
+        `${toolContext.label}: ツール呼び出しが上限 ${maxToolRounds} 回に達した後も最終応答を返さなかったため中断しました`,
+      )
     }
 
-    const { resultParts, debugEvents } = await invokeLanguageModelTools(toolCalls, tools, toolContext, token)
+    const withholdResults = toolBudgetExhausted || toolRoundsExhausted
+    const { resultParts, debugEvents } = withholdResults
+      ? omittedToolResults(toolCalls)
+      : await invokeLanguageModelTools(toolCalls, tools, toolContext, token)
     toolDebugEvents.push(...debugEvents.map(event => ({ ...event, round: round + 1 })))
-    messages.push(vscode.LanguageModelChatMessage.Assistant(assistantParts))
-    messages.push(vscode.LanguageModelChatMessage.User(resultParts))
+    const assistantMessage = vscode.LanguageModelChatMessage.Assistant(assistantParts)
+    let resultMessage = vscode.LanguageModelChatMessage.User(resultParts)
+
+    if (!toolBudgetExhausted && round + 1 >= maxToolRounds) {
+      if (!toolRoundsExhausted) {
+        logProgress(
+          toolContext.output,
+          `${toolContext.label}: ツール呼び出しが上限 ${maxToolRounds} 回に達したため、以降のツール結果を省略して最終応答を促します`,
+        )
+      }
+      toolRoundsExhausted = true
+      resultMessage = vscode.LanguageModelChatMessage.User([
+        ...resultParts,
+        new vscode.LanguageModelTextPart(toolRoundsExhaustedInstruction),
+      ])
+    } else if (!toolBudgetExhausted) {
+      resultMessage = vscode.LanguageModelChatMessage.User([
+        ...resultParts,
+        new vscode.LanguageModelTextPart(remainingToolRoundsNotice(maxToolRounds - round - 1, maxToolRounds)),
+      ])
+    }
+    let addedTokens = await countMessagesTokens(model, [assistantMessage, resultMessage], token)
+
+    if (!toolBudgetExhausted && tokenCount + addedTokens >= tokenLimit) {
+      // Tools stay declared because some providers reject tool_use history without tool definitions.
+      toolBudgetExhausted = true
+      logProgress(
+        toolContext.output,
+        `${toolContext.label}: 入力が token 上限に近づいたため、以降のツール結果を省略して最終応答を促します (${formatCount(tokenCount + addedTokens)}/${formatCount(model.maxInputTokens)} tokens)`,
+      )
+      resultMessage = vscode.LanguageModelChatMessage.User([
+        ...omittedToolResults(toolCalls).resultParts,
+        new vscode.LanguageModelTextPart(toolBudgetExhaustedInstruction),
+      ])
+      addedTokens = await countMessagesTokens(model, [assistantMessage, resultMessage], token)
+    }
+
+    tokenCount += addedTokens
+    if (tokenCount > model.maxInputTokens) {
+      throw new Error(
+        `${toolContext.label}: ツール呼び出し履歴を含めた入力が選択モデルの上限を超えたため送信を停止しました (${formatCount(tokenCount)}/${formatCount(model.maxInputTokens)} input tokens)`,
+      )
+    }
+    messages.push(assistantMessage)
+    messages.push(resultMessage)
   }
 
   throw new Error(`${toolContext.label}: ツール呼び出しループの継続上限に達しました`)
+}
+
+const toolBudgetExhaustedInstruction =
+  '重要: 入力サイズがモデルの上限に近づいたため、これ以降のツール結果は返せません。ツールを呼ばず、ここまでに得た情報だけで最終応答を作成してください。確認できなかった事項は未確認として明記してください。最終応答は必ず ARGOS_JSON_START と ARGOS_JSON_END の間に JSON オブジェクトだけを 1 個入れてください。'
+
+const toolRoundsExhaustedInstruction =
+  '重要: ツール呼び出し回数の上限に達したため、これ以降のツール結果は返せません。ツールを呼ばず、ここまでに得た情報だけで最終応答を作成してください。確認できなかった事項は未確認として明記してください。最終応答は必ず ARGOS_JSON_START と ARGOS_JSON_END の間に JSON オブジェクトだけを 1 個入れてください。'
+
+function remainingToolRoundsNotice(remaining: number, max: number): string {
+  const urgency =
+    remaining <= 2
+      ? '残りが少ないため、調査は本当に必要なものだけに絞り、可能なら今すぐ最終応答を作成してください。'
+      : '必要な調査が終わったら、残り回数を使い切らずに最終応答を作成してください。'
+  return `ツール呼び出しの残り往復回数: ${remaining}/${max}。${urgency}`
+}
+
+function omittedToolResults(toolCalls: readonly vscode.LanguageModelToolCallPart[]): {
+  resultParts: vscode.LanguageModelToolResultPart[]
+  debugEvents: Array<Omit<ModelDebugToolCall, 'round'>>
+} {
+  const notice = '入力サイズ上限に近づいたため、このツールは実行されませんでした。'
+  return {
+    resultParts: toolCalls.map(
+      toolCall => new vscode.LanguageModelToolResultPart(toolCall.callId, [new vscode.LanguageModelTextPart(notice)]),
+    ),
+    debugEvents: toolCalls.map(toolCall => ({ name: toolCall.name, input: toolCall.input, resultText: notice })),
+  }
+}
+
+async function countMessagesTokens(
+  model: vscode.LanguageModelChat,
+  messages: readonly vscode.LanguageModelChatMessage[],
+  token: vscode.CancellationToken,
+): Promise<number> {
+  let total = 0
+  for (const message of messages) {
+    try {
+      total += await model.countTokens(message, token)
+    } catch (error) {
+      if (token.isCancellationRequested) {
+        throw error
+      }
+      // Some providers cannot count tool parts; fall back to a conservative chars/3 estimate.
+      total += Math.ceil(formatLanguageModelMessagesForDebug([message]).length / 3)
+    }
+  }
+  return total
 }
 
 function shouldLogLanguageModelToolCallCount(label: string): boolean {
@@ -3147,7 +3432,10 @@ function shouldLogLanguageModelToolCallCount(label: string): boolean {
 }
 
 function maxToolRoundsForLabel(label: string): number {
-  return /Examiner|Rebuttal/.test(label) ? discussionLanguageModelToolRounds : defaultLanguageModelToolRounds
+  if (/Examiner|Rebuttal/.test(label)) {
+    return discussionLanguageModelToolRounds
+  }
+  return /Reviewer/.test(label) ? reviewerLanguageModelToolRounds : defaultLanguageModelToolRounds
 }
 
 async function sendLanguageModelRequest(
@@ -3611,7 +3899,8 @@ function supportsImageInput(model: vscode.LanguageModelChat): boolean {
 function toolCallingBudget(model: vscode.LanguageModelChat): number {
   const capabilities = (model as vscode.LanguageModelChat & { capabilities?: { toolCalling?: boolean | number } })
     .capabilities
-  if (capabilities?.toolCalling === false || capabilities?.toolCalling === undefined) {
+  // Consumer-side LanguageModelChat does not expose capabilities in the stable API, so undefined must not disable tools.
+  if (capabilities?.toolCalling === false) {
     return 0
   }
   if (typeof capabilities?.toolCalling === 'number') {
@@ -4413,11 +4702,12 @@ function formatAttachmentForPrompt(attachment: ReviewAttachment): string {
 }
 
 function formatCodeContextForPrompt(input: RunInput): string {
-  if (!input.codeContext) {
+  const context = [input.callSiteIndex, input.codeContext].filter(Boolean).join('\n\n---\n\n')
+  if (!context) {
     return ''
   }
 
-  return `\n\n関連コードコンテキスト:\n\n<<<ARGOS_CODE_CONTEXT\n${input.codeContext}\nARGOS_CODE_CONTEXT>>>`
+  return `\n\n関連コードコンテキスト:\n\n<<<ARGOS_CODE_CONTEXT\n${context}\nARGOS_CODE_CONTEXT>>>`
 }
 
 function yamlDoubleQuoted(value: string): string {
